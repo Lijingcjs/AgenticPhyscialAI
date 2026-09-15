@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runs/*
+!runs/.gitkeep
+*.egg-info/
+build/
+dist/
+
+# Local CAD, credentials, execution evidence and development notes.
+examples/
+*.scdoc
+*.msh
+*.h5
+.env
+.env.*
+auth.json
+auth-profiles.json
+task_plan.md
+findings.md
+progress.md
+.ruff_cache/
+*.sqlite
+*.trn
+*.log
