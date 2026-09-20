@@ -402,6 +402,13 @@ class SpaceClaimRunner:
             copied_images = [copied_image(item) for item in response.get("images", [])]
             for result in response.get("results", []):
                 result["images"] = [copied_image(item) for item in result.get("images", [])]
+            for result in response.get("candidate_render_results", []):
+                candidate_id = result.get("candidate_id")
+                result["images"] = [
+                    dict(item)
+                    for item in copied_images
+                    if item.get("candidate_id") == candidate_id
+                ]
             candidate_images = [
                 row for row in copied_images if row.get("candidate_id") and row.get("path")
             ]
@@ -474,6 +481,8 @@ class SpaceClaimRunner:
             "loops": [converted(row, "loop") for row in public.get("loops", [])],
             "images": response.get("images", []),
             "view_contract": response.get("view_contract"),
+            "candidate_render_results": response.get("candidate_render_results", []),
+            "candidate_render_summary": response.get("candidate_render_summary", {}),
             "native_catalog": native_catalog,
         }
         catalog = GeometryCatalog.model_validate(raw)

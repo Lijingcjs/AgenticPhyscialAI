@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cfd_agent.config import RuntimeConfig
+from cfd_agent.services.terminals import resolve_terminal_boundary
 
 from .spaceclaim import SpaceClaimError, SpaceClaimRunner
 from .windows_process import process_creation_time
@@ -151,6 +152,10 @@ class SpaceClaimBuildAdapter:
         catalog: dict[str, Any],
         selection_plan: dict[str, Any],
     ) -> dict[str, Any]:
+        terminal_boundaries = {
+            port["candidate_id"]: resolve_terminal_boundary(catalog, port["candidate_id"])
+            for port in selection_plan["openings"]
+        }
         return self._execute(
             "extract_volume",
             {
@@ -158,6 +163,7 @@ class SpaceClaimBuildAdapter:
                 "output": str(Path(output).resolve()),
                 "catalog": catalog,
                 "selection_plan": selection_plan,
+                "terminal_boundaries": terminal_boundaries,
             },
         )
 

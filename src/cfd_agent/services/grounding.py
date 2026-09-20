@@ -33,7 +33,11 @@ def _model_images(catalog: GeometryCatalog) -> list[Path]:
 def _native_open_edges(catalog: GeometryCatalog) -> list[dict[str, Any]]:
     native = getattr(catalog, "native_catalog", {})
     public = native.get("public", {}) if isinstance(native, dict) else {}
-    return [row for row in public.get("edges", []) if len(row.get("face_ids", [])) == 1]
+    return [
+        row
+        for row in public.get("edges", [])
+        if row.get("curve_type") == "Circle" and len(row.get("face_ids", [])) == 1
+    ]
 
 
 def plan_cad_selection(

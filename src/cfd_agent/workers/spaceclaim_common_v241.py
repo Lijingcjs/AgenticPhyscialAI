@@ -85,7 +85,7 @@ VIEW_CONTRACT = {
     "direction_reference": DIRECTION_REFERENCE_VIEW,
     "auxiliary_views": list(AUXILIARY_VIEWS),
     "selection_detail": "Selected",
-    "selected_projection": "planar_face_normal_or_isometric",
+    "selected_projection": "face_normal_or_curve_frame_with_explicit_extent_or_isometric",
 }
 LIVE_OBJECTS = {}
 try:
@@ -634,7 +634,7 @@ def resolved_for_candidate(candidate_id, catalog):
     return result
 
 
-def set_selected_projection(selected_faces, active, all_bodies):
+def set_selected_projection(selected_faces, selected_edges, active, all_bodies):
     if len(selected_faces) == 1:
         face = selected_faces[0]
         center = MeasureHelper.GetCentroid(Selection.Create(face))
@@ -656,6 +656,30 @@ def set_selected_projection(selected_faces, active, all_bodies):
                 direction = -direction
         ViewHelper.SetProjection(
             Frame.Create(center, direction), max(max(spans), 1e-6) * 2.2)
+    elif len(selected_edges) == 1:
+        # ZoomToEntity can derive a zero-height or zero-width camera box for a
+        # straight edge.  Use an explicit non-zero view extent instead.  A
+        # circle supplies its own curve frame; for a line or other curve, an
+        # adjacent planar face supplies a stable normal when available.
+        edge = selected_edges[0]
+        center = edge.Shape.GetBoundingBox(Matrix.Identity).Center
+        direction = None
+        curve_frame = getattr(edge.Shape.Geometry, "Frame", None)
+        if curve_frame is not None:
+            direction = curve_frame.DirZ
+        if direction is None:
+            for face in edge.Faces:
+                if isinstance(face.Shape.Geometry, Plane):
+                    direction = face.Shape.Geometry.Frame.DirZ
+                    break
+        if direction is not None:
+            ViewHelper.SetProjection(
+                Frame.Create(center, direction),
+                max(number(edge.Shape.Length) or 0.0, 1e-6) * 2.2)
+        else:
+            ViewHelper.SetProjection(
+                ViewHelper.ViewProjection.Isometric, True, False)
+            ViewHelper.ZoomToEntity(active)
     else:
         ViewHelper.SetProjection(
             ViewHelper.ViewProjection.Isometric, True, False)
@@ -726,7 +750,8 @@ def render_views(folder, stem, resolved, views, catalog=None):
         if resolved:
             try:
                 verify_active_selection(resolved, catalog)
-                set_selected_projection(selected_faces, active, all_bodies)
+                set_selected_projection(
+                    selected_faces, selected_edges, active, all_bodies)
                 refresh_for_export(request.get("ui_mode"))
                 path = os.path.join(folder, "%s-Selected.png" % stem)
                 export_picture(path)
@@ -740,6 +765,9 @@ def render_views(folder, stem, resolved, views, catalog=None):
             # which is why the exact one-face proxy is exported separately.
             owner_visibility = []
             try:
+                if not selected_faces:
+                    raise ValueError(
+                        "OwnerContext is only applicable to selected faces")
                 verify_active_selection(resolved, catalog)
                 owner_monikers = set()
                 for face in selected_faces:
@@ -765,8 +793,9 @@ def render_views(folder, stem, resolved, views, catalog=None):
                 verify_active_selection(resolved, catalog)
                 results.append(view_result("OwnerContext", path))
             except Exception:
-                results.append({
-                    "view": "OwnerContext", "error": traceback.format_exc()})
+                if selected_faces:
+                    results.append({
+                        "view": "OwnerContext", "error": traceback.format_exc()})
             finally:
                 for body, was_visible in owner_visibility:
                     try:
@@ -781,6 +810,9 @@ def render_views(folder, stem, resolved, views, catalog=None):
             proxy_bodies = []
             proxy_visibility = []
             try:
+                if not selected_faces:
+                    raise ValueError(
+                        "SelectedProxy is only applicable to selected faces")
                 verify_active_selection(resolved, catalog)
                 for body in all_bodies:
                     proxy_visibility.append((body, body.IsVisible(None)))
@@ -808,8 +840,9 @@ def render_views(folder, stem, resolved, views, catalog=None):
                 verify_active_selection(resolved, catalog)
                 results.append(view_result("SelectedProxy", path))
             except Exception:
-                results.append({
-                    "view": "SelectedProxy", "error": traceback.format_exc()})
+                if selected_faces:
+                    results.append({
+                        "view": "SelectedProxy", "error": traceback.format_exc()})
             finally:
                 for proxy in reversed(proxy_bodies):
                     try:
@@ -842,4 +875,3 @@ def get_request_path():
     if not path:
         raise ValueError("SPACECLAIM_GROUNDING_REQUEST is not set")
     return path
-

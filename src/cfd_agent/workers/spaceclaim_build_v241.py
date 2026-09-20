@@ -42,33 +42,41 @@ def save_picture(name):
     build_result["images"].append({"view": name, "path": path})
 
 
-def terminal_from_selection(port, catalog):
+def terminal_from_selection(port, boundary):
     target = LIVE_OBJECTS[port["candidate_id"]]
-    if port["candidate_id"].startswith("E"):
-        if target.Faces.Count != 1 or not isinstance(target.Shape.Geometry, Circle):
+    edges = [LIVE_OBJECTS[edge_id] for edge_id in boundary["edge_ids"]]
+    if boundary["kind"] in ("circular_edge", "circular_inner_loop"):
+        if len(edges) != 1:
+            raise ValueError("Circular opening must contain exactly one edge: " + port["name"])
+        edge = edges[0]
+        if boundary["kind"] == "circular_edge" and (
+                target.Faces.Count != 1 or not isinstance(target.Shape.Geometry, Circle)):
             raise ValueError("Selected opening edge is not one circular open edge: " + port["name"])
-        edge = target
+        if not isinstance(edge.Shape.Geometry, Circle):
+            raise ValueError("Selected opening loop is not circular: " + port["name"])
+        circle = edge.Shape.Geometry
+        center = vector3(circle.Frame.Origin)
+        normal = vector3(circle.Frame.DirZ)
+        area = math.pi * float(circle.Radius) * float(circle.Radius)
+        radius = float(circle.Radius)
     else:
         if not isinstance(target.Shape.Geometry, Plane):
             raise ValueError("Selected opening face is not planar: " + port["name"])
-        inner_loops = [
-            loop for loop in catalog["public"]["loops"]
-            if loop["face_id"] == port["candidate_id"] and not loop["is_outer"]
-        ]
-        if len(inner_loops) != 1 or len(inner_loops[0]["edge_ids"]) != 1:
-            raise ValueError("Selected opening face does not contain one circular inner loop: " + port["name"])
-        edge = LIVE_OBJECTS[inner_loops[0]["edge_ids"][0]]
-        if not isinstance(edge.Shape.Geometry, Circle):
-            raise ValueError("Selected opening loop is not circular: " + port["name"])
-    circle = edge.Shape.Geometry
-    return edge, {
+        center = vector3(MeasureHelper.GetCentroid(Selection.Create(target)))
+        normal = vector3(target.Shape.Geometry.Frame.DirZ)
+        area = float(target.Area)
+        radius = None
+    terminal = {
         "name": port["name"],
         "role": port["role"],
         "source_candidate_id": port["candidate_id"],
-        "center_m": vector3(circle.Frame.Origin),
-        "normal": vector3(circle.Frame.DirZ),
-        "radius_m": float(circle.Radius),
+        "center_m": center,
+        "normal": normal,
+        "area_m2": area,
     }
+    if radius is not None:
+        terminal["radius_m"] = radius
+    return edges, terminal
 
 
 try:
@@ -80,27 +88,44 @@ try:
         plan = build_request["selection_plan"]
         requested = [item["candidate_id"] for item in plan["openings"]]
         requested.append(plan["seed_inner_wall_id"])
+        boundaries = build_request["terminal_boundaries"]
+        for boundary in boundaries.values():
+            requested.extend(boundary["edge_ids"])
         validate_catalog_identity(build_request["catalog"], catalog, requested)
 
         cap_edges = []
         terminals = []
         for port in plan["openings"]:
-            edge, terminal = terminal_from_selection(port, catalog)
-            cap_edges.append(edge)
+            edges, terminal = terminal_from_selection(
+                port, boundaries[port["candidate_id"]])
+            cap_edges.extend(edges)
             terminals.append(terminal)
         seed_face = LIVE_OBJECTS[plan["seed_inner_wall_id"]]
         if plan["seed_inner_wall_id"].startswith("F") is False:
             raise ValueError("The fluid-volume seed must be a face")
         seed_center = MeasureHelper.GetCentroid(Selection.Create(seed_face))
         seed_point = seed_face.Shape.Geometry.ProjectPoint(seed_center).Point
-        options = VolumeExtractOptions()
-        options.SeedPoint = seed_face.Shape.Geometry.ProjectPoint(seed_center)
-        options.CreateShareTopology = False
-        extraction = VolumeExtract.Create(Selection.Create(cap_edges), Selection.Empty(), options)
-        volumes = list(extraction.CreatedVolumes)
-        if not extraction.Success or len(volumes) != 1 or volumes[0].Shape.Volume <= 0:
-            raise ValueError("VolumeExtract did not create exactly one positive fluid volume")
-        fluid = volumes[0]
+        terminal_faces = [
+            LIVE_OBJECTS[port["candidate_id"]] for port in plan["openings"]]
+        existing_body = seed_face.Parent
+        use_existing_body = (
+            all(boundary["kind"] == "terminal_face" for boundary in boundaries.values())
+            and all(face.Parent == existing_body for face in terminal_faces)
+            and existing_body.Shape.Volume > 0)
+        if use_existing_body:
+            fluid = existing_body
+            source_mode = "existing_fluid_body"
+        else:
+            options = VolumeExtractOptions()
+            options.SeedPoint = seed_face.Shape.Geometry.ProjectPoint(seed_center)
+            options.CreateShareTopology = False
+            extraction = VolumeExtract.Create(
+                Selection.Create(cap_edges), Selection.Empty(), options)
+            volumes = list(extraction.CreatedVolumes)
+            if not extraction.Success or len(volumes) != 1 or volumes[0].Shape.Volume <= 0:
+                raise ValueError("VolumeExtract did not create exactly one positive fluid volume")
+            fluid = volumes[0]
+            source_mode = "extracted_internal_volume"
         for group in list(Window.ActiveWindow.Groups):
             group.Delete()
         others = [body for body in DocumentHelper.GetRootPart().GetAllBodies() if body != fluid]
@@ -121,6 +146,7 @@ try:
             "volume_m3": float(fluid.Shape.Volume),
             "face_count": int(fluid.Faces.Count),
             "free_edges": free_edges,
+            "source_mode": source_mode,
         }
         record("extract_volume", build_result["transfer"])
         save_picture("extracted-fluid")
@@ -138,7 +164,9 @@ try:
         groups = []
         for terminal in transfer["terminals"]:
             matches = []
-            target_area = math.pi * terminal["radius_m"] * terminal["radius_m"]
+            target_area = terminal.get("area_m2")
+            if target_area is None:
+                target_area = math.pi * terminal["radius_m"] * terminal["radius_m"]
             for face in fluid.Faces:
                 if not isinstance(face.Shape.Geometry, Plane):
                     continue

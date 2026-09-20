@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -99,13 +100,17 @@ class ProviderRequestError(GroundingLLMError):
         capability_status: VisionStatus,
         reason: str,
         transport_error_type: str | None = None,
+        transport_attempts: int | None = None,
     ) -> None:
         self.status_code = status_code
         self.capability_status = capability_status
         self.reason = reason
         self.transport_error_type = transport_error_type
+        self.transport_attempts = transport_attempts
         status = str(status_code) if status_code is not None else "transport"
         diagnostic = f" [{transport_error_type}]" if transport_error_type else ""
+        if transport_attempts is not None:
+            diagnostic += f" after {transport_attempts} attempts"
         super().__init__(f"Provider request failed ({status}): {reason}{diagnostic}")
 
 
@@ -312,11 +317,27 @@ class CodexOAuthResponsesTransport:
         base_url: str = "https://chatgpt.com/backend-api/codex",
         timeout_seconds: int | None = None,
         session: requests.Session | None = None,
+        max_transport_retries: int | None = None,
+        retry_backoff_seconds: float | None = None,
     ) -> None:
         self._credentials = credentials
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds or int(os.getenv("FOAMAGENT_HTTP_TIMEOUT", "300"))
         self._session = session or requests.Session()
+        self._max_transport_retries = (
+            int(os.getenv("FOAMAGENT_HTTP_RETRIES", "2"))
+            if max_transport_retries is None
+            else max_transport_retries
+        )
+        self._retry_backoff_seconds = (
+            float(os.getenv("FOAMAGENT_HTTP_RETRY_BACKOFF", "0.5"))
+            if retry_backoff_seconds is None
+            else retry_backoff_seconds
+        )
+        if self._max_transport_retries < 0:
+            raise ValueError("max_transport_retries must be non-negative")
+        if self._retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -330,21 +351,45 @@ class CodexOAuthResponsesTransport:
         return headers
 
     def complete(self, payload: dict[str, Any]) -> str:
-        try:
-            response = self._session.post(
-                f"{self._base_url}/responses",
-                headers=self._headers(),
-                json=payload,
-                timeout=self._timeout_seconds,
-                stream=True,
-            )
-        except requests.RequestException as error:
-            raise ProviderRequestError(
-                status_code=None,
-                capability_status=VisionStatus.BLOCKED,
-                reason="provider_transport_blocked",
-                transport_error_type=type(error).__name__,
-            ) from error
+        response = None
+        attempts = self._max_transport_retries + 1
+        retryable_errors = (
+            requests.exceptions.SSLError,
+            requests.exceptions.ProxyError,
+            requests.exceptions.ConnectTimeout,
+            requests.exceptions.ConnectionError,
+        )
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._session.post(
+                    f"{self._base_url}/responses",
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=self._timeout_seconds,
+                    stream=True,
+                )
+                break
+            except retryable_errors as error:
+                if attempt == attempts:
+                    raise ProviderRequestError(
+                        status_code=None,
+                        capability_status=VisionStatus.BLOCKED,
+                        reason="provider_transport_blocked",
+                        transport_error_type=type(error).__name__,
+                        transport_attempts=attempt,
+                    ) from error
+                time.sleep(self._retry_backoff_seconds * (2 ** (attempt - 1)))
+            except requests.RequestException as error:
+                raise ProviderRequestError(
+                    status_code=None,
+                    capability_status=VisionStatus.BLOCKED,
+                    reason="provider_transport_blocked",
+                    transport_error_type=type(error).__name__,
+                    transport_attempts=attempt,
+                ) from error
+
+        if response is None:
+            raise RuntimeError("Provider transport did not return a response")
 
         if not 200 <= int(response.status_code) < 300:
             try:
@@ -612,6 +657,7 @@ class GroundingLLMClient:
                     "capability_status": error.capability_status.value,
                     "reason": error.reason,
                     "transport_error_type": error.transport_error_type,
+                    "transport_attempts": error.transport_attempts,
                 }
             )
         self._write_audit_json(call_dir / "error.json", record)
