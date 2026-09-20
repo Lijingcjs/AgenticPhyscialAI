@@ -151,6 +151,7 @@ class SpaceClaimBuildAdapter:
         output: str | Path,
         catalog: dict[str, Any],
         selection_plan: dict[str, Any],
+        existing_fluid_body: bool = False,
     ) -> dict[str, Any]:
         terminal_boundaries = {
             port["candidate_id"]: resolve_terminal_boundary(catalog, port["candidate_id"])
@@ -163,7 +164,7 @@ class SpaceClaimBuildAdapter:
                 "output": str(Path(output).resolve()),
                 "catalog": catalog,
                 "selection_plan": selection_plan,
-                "terminal_boundaries": terminal_boundaries,
+                "existing_fluid_body": existing_fluid_body,
             },
         )
 

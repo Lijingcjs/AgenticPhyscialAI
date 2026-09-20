@@ -16,6 +16,24 @@ from cfd_agent.services.grounding import extract_mesh_requirements, plan_cad_sel
 from cfd_agent.state import PipelineState
 
 
+def _is_existing_fluid_body(catalog: GeometryCatalog) -> bool:
+    """Return whether the input already contains one closed positive-volume body.
+
+    A closed solid body can be sent directly to boundary grouping and meshing;
+    sheet bodies or bodies with free edges still need volume extraction.
+    """
+    positive = [
+        body
+        for body in catalog.bodies
+        if body.solid_or_sheet == "solid" and (body.volume_m3 or 0.0) > 0.0
+    ]
+    if len(positive) != 1:
+        return False
+    body_id = positive[0].id
+    body_edges = [edge for edge in catalog.edges if edge.body_id == body_id]
+    return bool(body_edges) and all(len(edge.face_ids) == 2 for edge in body_edges)
+
+
 def prepare(state: PipelineState) -> dict[str, Any]:
     try:
         source = Path(state["source_geometry"]).resolve()
@@ -49,7 +67,9 @@ def query_geometry(state: PipelineState) -> dict[str, Any]:
             catalog, path = runner.catalog(
                 Path(state["working_geometry"]),
                 render_candidates=True,
-                candidate_collections=["faces", "edges"],
+                # Loops expose arbitrary multi-edge opening contours (rectangles,
+                # polygons, splines) that cannot be represented by one edge.
+                candidate_collections=["faces", "edges", "loops"],
             )
         finally:
             runner.close()
@@ -134,6 +154,8 @@ def verify_selection(state: PipelineState) -> dict[str, Any]:
 def extract_volume(state: PipelineState) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
+        catalog = GeometryCatalog.model_validate(state["catalog"])
+        existing_fluid_body = _is_existing_fluid_body(catalog)
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],
@@ -142,8 +164,9 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
         result = adapter.extract_volume(
             source=state["working_geometry"],
             output=output,
-            catalog=GeometryCatalog.model_validate(state["catalog"]).native_catalog,
+            catalog=catalog.native_catalog,
             selection_plan=state["selection_plan"],
+            existing_fluid_body=existing_fluid_body,
         )
         return _persist(
             state,
@@ -151,6 +174,9 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
             {
                 "extraction": result,
                 "working_geometry": str(output),
+                "fluid_volume_mode": result.get("transfer", {}).get(
+                    "mode", "extracted"
+                ),
                 "error": "",
             },
         )
