@@ -36,7 +36,8 @@ def _native_open_edges(catalog: GeometryCatalog) -> list[dict[str, Any]]:
     return [
         row
         for row in public.get("edges", [])
-        if row.get("curve_type") == "Circle" and len(row.get("face_ids", [])) == 1
+        if len(row.get("face_ids", [])) == 1
+        and (row.get("curve_type") == "Circle" or row.get("closed") is True)
     ]
 
 

@@ -34,6 +34,28 @@ def _is_existing_fluid_body(catalog: GeometryCatalog) -> bool:
     return bool(body_edges) and all(len(edge.face_ids) == 2 for edge in body_edges)
 
 
+def _prompt_explicitly_declares_fluid_body(prompt: str) -> bool:
+    """Return true only when the user explicitly says the input is fluid volume."""
+    text = " ".join(prompt.casefold().split())
+    phrases = (
+        "already the fluid domain",
+        "already a fluid domain",
+        "existing fluid domain",
+        "existing fluid body",
+        "input is the fluid domain",
+        "input is a fluid domain",
+        "输入就是流体域",
+        "输入为流体域",
+        "已有流体域",
+        "已经是流体域",
+        "无需体积抽取",
+        "跳过体积抽取",
+        "skip volume extract",
+        "skip volume extraction",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
 def prepare(state: PipelineState) -> dict[str, Any]:
     try:
         source = Path(state["source_geometry"]).resolve()
@@ -155,7 +177,7 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
         catalog = GeometryCatalog.model_validate(state["catalog"])
-        existing_fluid_body = _is_existing_fluid_body(catalog)
+        existing_fluid_body = _prompt_explicitly_declares_fluid_body(state.get("prompt", ""))
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],
@@ -175,7 +197,7 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
                 "extraction": result,
                 "working_geometry": str(output),
                 "fluid_volume_mode": result.get("transfer", {}).get(
-                    "mode", "extracted"
+                    "source_mode", result.get("transfer", {}).get("mode", "extracted")
                 ),
                 "error": "",
             },

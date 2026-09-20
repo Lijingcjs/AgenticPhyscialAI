@@ -165,6 +165,7 @@ class SpaceClaimBuildAdapter:
                 "catalog": catalog,
                 "selection_plan": selection_plan,
                 "existing_fluid_body": existing_fluid_body,
+                "terminal_boundaries": terminal_boundaries,
             },
         )
 

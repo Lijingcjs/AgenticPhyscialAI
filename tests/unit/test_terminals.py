@@ -68,6 +68,29 @@ def test_annular_face_keeps_using_its_circular_inner_loop():
     }
 
 
+def test_selected_loop_preserves_all_edges_for_a_non_circular_opening():
+    data = catalog(
+        edges=[
+            {"id": edge_id, "curve_type": "Line", "face_ids": ["F1", "F2"]}
+            for edge_id in ("E1", "E2", "E3", "E4")
+        ],
+        loops=[
+            {
+                "id": "L1",
+                "face_id": "F1",
+                "closed": True,
+                "is_outer": True,
+                "edge_ids": ["E1", "E2", "E3", "E4"],
+            }
+        ],
+    )
+
+    assert resolve_terminal_boundary(data, "L1") == {
+        "kind": "loop",
+        "edge_ids": ["E1", "E2", "E3", "E4"],
+    }
+
+
 def test_nonplanar_terminal_face_is_rejected():
     data = catalog(faces=[{"id": "F1", "surface_type": "Cylinder"}])
 

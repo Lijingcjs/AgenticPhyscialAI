@@ -1,8 +1,11 @@
 """Opening topology candidates exposed to the CAD grounding model."""
 
+from cfd_agent.nodes.cad import (
+    _is_existing_fluid_body,
+    _prompt_explicitly_declares_fluid_body,
+)
 from cfd_agent.services.geometry_models import GeometryCatalog
 from cfd_agent.services.grounding import _opening_candidate_context
-from cfd_agent.nodes.cad import _is_existing_fluid_body
 
 
 def test_opening_context_exposes_planar_faces_and_closed_arbitrary_loops():
@@ -77,3 +80,13 @@ def test_sheet_or_open_body_still_requires_volume_extract():
     )
 
     assert not _is_existing_fluid_body(catalog)
+
+
+def test_volume_extraction_is_the_default_when_prompt_is_silent():
+    assert not _prompt_explicitly_declares_fluid_body("Select the left inlet and right outlet.")
+
+
+def test_existing_fluid_body_requires_an_explicit_prompt_statement():
+    assert _prompt_explicitly_declares_fluid_body(
+        "The input is already the fluid domain; keep its existing volume."
+    )

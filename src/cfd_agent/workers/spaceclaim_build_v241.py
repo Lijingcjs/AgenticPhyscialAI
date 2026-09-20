@@ -54,24 +54,6 @@ def _face_loops(catalog, face_id):
             if row["face_id"] == face_id]
 
 
-def _edge_center(edge):
-    geometry = edge.Shape.Geometry
-    frame = getattr(geometry, "Frame", None)
-    if frame is not None and isinstance(geometry, Circle):
-        return vector3(frame.Origin)
-    start = vector3(edge.Shape.StartPoint)
-    end = vector3(edge.Shape.EndPoint)
-    return [(start[index] + end[index]) * 0.5 for index in range(3)]
-
-
-def _boundary_center(edges, fallback):
-    points = [_edge_center(edge) for edge in edges]
-    if not points:
-        return fallback
-    return [sum(point[index] for point in points) / len(points)
-            for index in range(3)]
-
-
 def _boundary_edges(loop):
     edge_ids = loop.get("edge_ids") or []
     if not edge_ids:
@@ -115,9 +97,10 @@ def _face_can_cap_opening(port, catalog):
 def _terminal_record(port, face, loop, edges):
     if not isinstance(face.Shape.Geometry, Plane):
         raise ValueError("Selected opening support face is not planar: " + port["name"])
-    center = _boundary_center(
-        edges,
-        vector3(MeasureHelper.GetCentroid(Selection.Create(face))))
+    # Use SpaceClaim's actual support-face centroid. Averaging edge midpoints
+    # changes when a contour is split into segments and is not stable for
+    # irregular openings.
+    center = vector3(MeasureHelper.GetCentroid(Selection.Create(face)))
     perimeter = sum(float(edge.Shape.Length) for edge in edges)
     terminal = {
         "name": port["name"],
@@ -134,9 +117,9 @@ def _terminal_record(port, face, loop, edges):
     # the loop perimeter and centroid are enough to identify the extracted cap
     # without assuming a particular primitive shape.
     if loop.get("is_outer"):
-        terminal["opening_area_m2"] = float(face.Area)
+        terminal["area_m2"] = float(face.Area)
     elif len(edges) == 1 and isinstance(edges[0].Shape.Geometry, Circle):
-        terminal["opening_area_m2"] = math.pi * float(edges[0].Shape.Geometry.Radius) ** 2
+        terminal["area_m2"] = math.pi * float(edges[0].Shape.Geometry.Radius) ** 2
     return terminal
 
 
@@ -231,7 +214,7 @@ try:
                     "Existing fluid body contains free edges: " + str(free_edges))
             DocumentSave.Execute(build_request["output"])
             build_result["transfer"] = {
-                "mode": "existing_fluid_body",
+                "source_mode": "existing_fluid_body",
                 "terminals": terminals,
                 "seed_point_m": vector3(seed_point),
                 "volume_m3": float(fluid.Shape.Volume),
@@ -293,7 +276,7 @@ try:
             if free_edges:
                 raise ValueError("Extracted fluid body contains free edges: " + str(free_edges))
             build_result["transfer"] = {
-                "mode": "volume_extract",
+                "source_mode": "volume_extract",
                 "terminals": terminals,
                 "seed_point_m": vector3(seed_point),
                 "volume_m3": float(fluid.Shape.Volume),
@@ -316,7 +299,7 @@ try:
         groups = []
         for terminal in transfer["terminals"]:
             matches = []
-            target_area = terminal.get("opening_area_m2")
+            target_area = terminal.get("area_m2", terminal.get("opening_area_m2"))
             target_perimeter = terminal["boundary_perimeter_m"]
             for face in fluid.Faces:
                 if not isinstance(face.Shape.Geometry, Plane):

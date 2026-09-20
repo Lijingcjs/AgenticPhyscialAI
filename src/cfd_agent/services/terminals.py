@@ -20,9 +20,27 @@ def resolve_terminal_boundary(catalog: dict[str, Any], candidate_id: str) -> dic
         edge = edges.get(candidate_id)
         if edge is None:
             raise ValueError(f"Unknown opening edge: {candidate_id}")
-        if edge.get("curve_type") != "Circle" or len(edge.get("face_ids", [])) != 1:
-            raise ValueError("Selected opening edge is not one circular open edge")
-        return {"kind": "circular_edge", "edge_ids": [candidate_id]}
+        if len(edge.get("face_ids", [])) != 1:
+            raise ValueError("Selected opening edge is not a single-face boundary")
+        if edge.get("curve_type") != "Circle" and edge.get("closed") is not True:
+            raise ValueError("Selected opening edge is not a closed boundary")
+        kind = "circular_edge" if edge.get("curve_type") == "Circle" else "closed_edge"
+        return {"kind": kind, "edge_ids": [candidate_id]}
+
+    if candidate_id.startswith("L"):
+        loops = {row["id"]: row for row in public.get("loops", [])}
+        boundary = loops.get(candidate_id)
+        if boundary is None:
+            raise ValueError(f"Unknown opening loop: {candidate_id}")
+        if boundary.get("closed") is not True:
+            raise ValueError("Selected opening loop is not closed")
+        edge_ids = boundary.get("edge_ids", [])
+        if not edge_ids:
+            raise ValueError("Selected opening loop has no edges")
+        missing = [edge_id for edge_id in edge_ids if edge_id not in edges]
+        if missing:
+            raise ValueError(f"Opening loop contains unknown edges: {missing}")
+        return {"kind": "loop", "edge_ids": list(edge_ids)}
 
     faces = {row["id"]: row for row in public.get("faces", [])}
     face = faces.get(candidate_id)
@@ -40,9 +58,11 @@ def resolve_terminal_boundary(catalog: dict[str, Any], candidate_id: str) -> dic
             raise ValueError("Selected opening face does not contain one inner loop")
         boundary = inner_loops[0]
         edge_ids = boundary.get("edge_ids", [])
-        if len(edge_ids) != 1 or edges.get(edge_ids[0], {}).get("curve_type") != "Circle":
-            raise ValueError("Selected opening inner loop is not circular")
-        kind = "circular_inner_loop"
+        if not edge_ids:
+            raise ValueError("Selected opening inner loop has no edges")
+        kind = "circular_inner_loop" if (
+            len(edge_ids) == 1 and edges.get(edge_ids[0], {}).get("curve_type") == "Circle"
+        ) else "inner_loop"
     else:
         outer_loops = [row for row in loops if row.get("is_outer")]
         if len(outer_loops) != 1 or not outer_loops[0].get("edge_ids"):

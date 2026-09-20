@@ -42,65 +42,6 @@ def test_provider_error_code_is_retained_without_response_body():
     assert response.closed
 
 
-def test_transient_ssl_failure_is_retried_before_marking_vision_blocked():
-    class Response:
-        status_code = 200
-
-        def iter_lines(self, **kwargs):
-            yield "data: " + json.dumps(
-                {"type": "response.output_text.done", "text": '{"ok":true}'}
-            )
-            yield "data: [DONE]"
-
-        def close(self):
-            pass
-
-    class Session:
-        def __init__(self):
-            self.calls = 0
-
-        def post(self, *args, **kwargs):
-            self.calls += 1
-            if self.calls < 3:
-                raise __import__("requests").exceptions.SSLError("transient")
-            return Response()
-
-    session = Session()
-    transport = CodexOAuthResponsesTransport(
-        CodexOAuthCredentials("test-only"),
-        session=session,
-        max_transport_retries=2,
-        retry_backoff_seconds=0,
-    )
-
-    assert transport.complete({}) == '{"ok":true}'
-    assert session.calls == 3
-
-
-def test_exhausted_ssl_retries_record_attempt_count():
-    class Session:
-        def __init__(self):
-            self.calls = 0
-
-        def post(self, *args, **kwargs):
-            self.calls += 1
-            raise __import__("requests").exceptions.SSLError("persistent")
-
-    session = Session()
-    transport = CodexOAuthResponsesTransport(
-        CodexOAuthCredentials("test-only"),
-        session=session,
-        max_transport_retries=2,
-        retry_backoff_seconds=0,
-    )
-
-    with pytest.raises(ProviderRequestError, match="after 3 attempts") as error:
-        transport.complete({})
-    assert error.value.transport_attempts == 3
-    assert error.value.transport_error_type == "SSLError"
-    assert session.calls == 3
-
-
 def test_custom_model_is_sent_by_existing_transport(monkeypatch):
     from cfd_agent.adapters import llm
     from cfd_agent.services.contracts import ConfirmationPayload

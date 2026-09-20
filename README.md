@@ -50,6 +50,11 @@ Optional: [global size, local refinement, boundary-layer settings, and length un
 
 Specify a reference view when using directions such as left or right.
 
+By default, the workflow extracts the internal fluid volume from the selected opening
+boundaries. It skips volume extraction only when the prompt explicitly states that the
+input solid is already the fluid domain. A planar face or a closed loop can represent an
+opening; a loop may contain multiple line, arc, spline, or mixed-curve edges.
+
 ### 3. Run
 
 ```powershell
