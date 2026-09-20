@@ -36,6 +36,26 @@ def _native_open_edges(catalog: GeometryCatalog) -> list[dict[str, Any]]:
     return [row for row in public.get("edges", []) if len(row.get("face_ids", [])) == 1]
 
 
+def _opening_candidate_context(catalog: GeometryCatalog) -> dict[str, Any]:
+    """Describe the topology representations accepted by volume extraction."""
+    return {
+        "planar_faces": [
+            row.id for row in catalog.faces
+            if row.surface_type == "Plane"
+        ],
+        "closed_loops": [
+            row.id for row in catalog.loops
+            if row.closed is True
+        ],
+        "single_face_edges": _native_open_edges(catalog),
+        "selection_guidance": (
+            "Prefer a planar face or a closed loop for an arbitrary opening. "
+            "A face may use its one inner loop (a cutout) or its one outer loop "
+            "(a flush end). Use an edge only when it is itself a closed boundary."
+        ),
+    }
+
+
 def plan_cad_selection(
     *,
     catalog: GeometryCatalog,
@@ -55,13 +75,14 @@ def plan_cad_selection(
         if probe.status.value != "verified":
             raise RuntimeError(settings.model + " image input is not available: " + probe.reason)
     context = catalog.public_dict()
-    context["single_face_open_edges"] = _native_open_edges(catalog)
+    context["opening_candidates"] = _opening_candidate_context(catalog)
     prompt = (
         "USER REQUEST:\n"
         + user_prompt
         + "\n\nCANDIDATE CATALOG (metres, global SpaceClaim XYZ):\n"
         + json.dumps(context, ensure_ascii=False)
-        + "\n\nIMAGE ORDER: Front, Top, Right, Isometric, followed by neutral candidate contact sheets. "
+        + "\n\nIMAGE ORDER: Front, Top, Right, Isometric, followed by neutral candidate "
+        "contact sheets. "
         "Candidate sheets label every visible candidate with its temporary ID."
     )
     answer = client.invoke(
