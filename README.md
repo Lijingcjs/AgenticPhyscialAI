@@ -13,10 +13,20 @@ Meshing uses Fluent Watertight Geometry and poly-hexcore.
 - Windows; Python 3.12 is recommended (package metadata allows 3.11–3.13).
 - Ansys 2024 R1 (v241), including SpaceClaim, Fluent, and a valid Ansys license.
 - An existing `.scdoc` file and a nonempty UTF-8 prompt file.
+- Codex CLI installed for the first-time login or later reauthentication.
 - Existing Codex OAuth credentials and access to a compatible image-capable model.
 
-The usual credential location is `%USERPROFILE%\.codex\auth.json`. The workflow currently
-uses Codex OAuth only; API-key authentication and other model providers are not integrated.
+The usual credential location is `%USERPROFILE%\.codex\auth.json`. When the CFD Agent needs
+the model and cannot find a readable cache, it automatically runs `codex login` and opens the
+browser authorization flow. Complete the authorization in the browser; the workflow continues
+after Codex saves the credentials. To use device-code authentication instead, set
+`$env:FOAMAGENT_CODEX_DEVICE_AUTH = "1"` before starting the run. If Codex stores credentials
+in the OS keyring rather than `auth.json`, configure its credential store to `file`, or set
+`CODEX_HOME` / `FOAMAGENT_CODEX_AUTH_PATH` to a readable file-based cache.
+
+The workflow currently uses Codex OAuth only; API-key authentication and other model providers
+are not integrated. OAuth caches contain access tokens and must never be committed to GitHub or
+copied into chat messages.
 The default model is `gpt-5.6-luna`. `--model` selects another compatible model available
 through the same service; it does not change the provider or authentication method.
 

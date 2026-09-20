@@ -1,6 +1,7 @@
 """Offline protocol events, not claims of a real model call."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +59,58 @@ def test_custom_model_is_sent_by_existing_transport(monkeypatch):
     client = llm.GroundingLLMClient.from_codex_oauth(model="chosen-model")
     client.invoke(system_prompt="test", user_prompt="test", response_model=ConfirmationPayload)
     assert payloads[0]["model"] == "chosen-model"
+
+
+def test_missing_codex_cache_starts_cli_login(monkeypatch):
+    from cfd_agent.adapters import llm
+
+    credentials = iter(
+        [FileNotFoundError("missing"), CodexOAuthCredentials("offline")]
+    )
+    login_calls = []
+
+    def load(_path):
+        value = next(credentials)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    class Transport:
+        def complete(self, payload):
+            return "{}"
+
+    monkeypatch.setattr(llm, "load_codex_oauth", load)
+    monkeypatch.setattr(llm.shutil, "which", lambda name: "codex")
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda command, check: login_calls.append((command, check))
+        or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(llm, "CodexOAuthResponsesTransport", lambda *args, **kwargs: Transport())
+
+    llm.GroundingLLMClient.from_codex_oauth(model="chosen-model")
+
+    assert login_calls == [(["codex", "login"], False)]
+
+
+def test_device_auth_mode_is_forwarded_to_codex_cli(monkeypatch):
+    from cfd_agent.adapters import llm
+
+    monkeypatch.setenv("FOAMAGENT_CODEX_DEVICE_AUTH", "1")
+    login_calls = []
+    monkeypatch.setattr(llm, "load_codex_oauth", lambda _path: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(llm.shutil, "which", lambda name: "codex")
+    monkeypatch.setattr(
+        llm.subprocess,
+        "run",
+        lambda command, check: login_calls.append(command) or SimpleNamespace(returncode=1),
+    )
+
+    with pytest.raises(llm.CodexOAuthLoginError, match="Codex login failed"):
+        llm.GroundingLLMClient.from_codex_oauth(model="chosen-model")
+
+    assert login_calls == [["codex", "login", "--device-auth"]]
 
 
 def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, monkeypatch):

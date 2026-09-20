@@ -14,6 +14,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -73,6 +75,10 @@ class VisionProbeResult:
 
 class GroundingLLMError(RuntimeError):
     """Base class for model-client failures."""
+
+
+class CodexOAuthLoginError(GroundingLLMError):
+    """The Codex CLI login flow could not create a readable OAuth cache."""
 
 
 class StructuredOutputError(GroundingLLMError):
@@ -259,6 +265,64 @@ def load_codex_oauth(auth_path: str | Path | None = None) -> CodexOAuthCredentia
             return _load_clawdbot_auth(path)
         return _load_auth_json(path)
     raise FileNotFoundError("No Codex OAuth cache was found")
+
+
+def _device_auth_requested() -> bool:
+    value = os.getenv("FOAMAGENT_CODEX_DEVICE_AUTH", "")
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _run_codex_login(*, device_auth: bool = False) -> None:
+    """Delegate browser/device authentication to the installed Codex CLI."""
+
+    executable = shutil.which("codex")
+    if executable is None:
+        raise CodexOAuthLoginError(
+            "Codex OAuth credentials are missing and the 'codex' CLI was not found. "
+            "Install Codex CLI, then run the CFD Agent again."
+        )
+
+    command = [executable, "login"]
+    if device_auth:
+        command.append("--device-auth")
+        print("[Auth] Starting Codex device-code login. Complete authorization in your browser.")
+    else:
+        print("[Auth] Starting Codex login. Complete authorization in the browser window.")
+
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as error:
+        raise CodexOAuthLoginError(f"Could not start Codex login: {type(error).__name__}") from error
+    if result.returncode != 0:
+        raise CodexOAuthLoginError(
+            f"Codex login failed with exit code {result.returncode}. "
+            "Run 'codex login' manually and try again."
+        )
+
+
+def ensure_codex_oauth(
+    auth_path: str | Path | None = None,
+    *,
+    device_auth: bool | None = None,
+) -> CodexOAuthCredentials:
+    """Load OAuth credentials, starting Codex login once when the cache is absent."""
+
+    try:
+        return load_codex_oauth(auth_path)
+    except FileNotFoundError as missing:
+        _run_codex_login(
+            device_auth=_device_auth_requested() if device_auth is None else device_auth
+        )
+        try:
+            return load_codex_oauth(auth_path)
+        except (FileNotFoundError, ValueError) as error:
+            raise CodexOAuthLoginError(
+                "Codex login completed, but CFD Agent still cannot read an OAuth cache. "
+                "Ensure Codex stores credentials in auth.json and that CODEX_HOME or "
+                "FOAMAGENT_CODEX_AUTH_PATH points to it."
+            ) from error
+    except ValueError:
+        raise
 
 
 def _extract_output_text(response_json: dict[str, Any]) -> str:
@@ -486,12 +550,15 @@ class GroundingLLMClient:
         *,
         model: str = PRODUCTION_MODEL,
         auth_path: str | Path | None = None,
+        auto_login: bool = True,
         instructions: str = _DEFAULT_INSTRUCTIONS,
         base_url: str = "https://chatgpt.com/backend-api/codex",
         timeout_seconds: int | None = None,
         audit_dir: str | Path | None = None,
     ) -> "GroundingLLMClient":
-        credentials = load_codex_oauth(auth_path)
+        credentials = (
+            ensure_codex_oauth(auth_path) if auto_login else load_codex_oauth(auth_path)
+        )
         transport = CodexOAuthResponsesTransport(
             credentials,
             base_url=base_url,
@@ -787,6 +854,7 @@ class GroundingLLMClient:
 
 __all__ = [
     "CodexOAuthCredentials",
+    "CodexOAuthLoginError",
     "CodexOAuthResponsesTransport",
     "GroundingLLMClient",
     "GroundingLLMError",
@@ -799,5 +867,6 @@ __all__ = [
     "VisionProbeResult",
     "VisionStatus",
     "VisionUnavailableError",
+    "ensure_codex_oauth",
     "load_codex_oauth",
 ]
