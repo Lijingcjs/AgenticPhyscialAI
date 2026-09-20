@@ -1,8 +1,9 @@
 # CFD Agent
 
 CFD Agent generates Fluent volume meshes from a SpaceClaim CAD file and a natural-language
-prompt. It supports a single connected internal fluid domain with circular
-openings, with human confirmation before meshing. Flow solving is not included.
+prompt. It supports a single connected internal fluid domain with planar terminal
+openings, either extracted from an enclosure or supplied as an existing positive-volume
+fluid body, with human confirmation before meshing. Flow solving is not included.
 
 The workflow uses LangGraph for orchestration, a language model for interpretation and
 failure diagnosis, SpaceClaim for fluid-domain extraction, and PyFluent for meshing.

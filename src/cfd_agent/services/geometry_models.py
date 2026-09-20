@@ -94,6 +94,8 @@ class GeometryCatalog(BaseModel):
     edges: list[CatalogObject] = Field(default_factory=list)
     loops: list[CatalogObject] = Field(default_factory=list)
     images: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_render_results: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_render_summary: dict[str, int] = Field(default_factory=dict)
 
     def all_objects(self) -> list[CatalogObject]:
         return [*self.bodies, *self.faces, *self.edges, *self.loops]

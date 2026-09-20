@@ -43,19 +43,68 @@ try:
             collections = request.get("candidate_collections") or ["bodies", "faces", "edges", "loops"]
             if any(item not in ("bodies", "faces", "edges", "loops") for item in collections):
                 raise ValueError("Unknown candidate collection")
+            response["candidate_render_results"] = []
             for collection in collections:
                 for row in catalog["public"].get(collection, []):
                     candidate_id = row["id"]
-                    rendered = render_views(
-                        folder, stem + "-candidate-" + candidate_id,
-                        resolved_for_candidate(candidate_id, catalog), [], catalog)
-                    require_rendered_views(rendered, ["Selected"])
-                    for item in rendered:
-                        item["candidate_id"] = candidate_id
-                        item["candidate_kind"] = {
-                            "bodies": "body", "faces": "face",
-                            "edges": "edge", "loops": "loop"}[collection]
-                    response["images"].extend(rendered)
+                    candidate_kind = {
+                        "bodies": "body", "faces": "face",
+                        "edges": "edge", "loops": "loop"}[collection]
+                    candidate_result = {
+                        "candidate_id": candidate_id,
+                        "candidate_kind": candidate_kind,
+                        "status": "pending",
+                        "images": [],
+                    }
+
+                    # Direct edge selection is executable only for the legacy
+                    # single circular open-edge representation.  Keep every
+                    # edge in the topology catalog, but do not render unrelated
+                    # seam/straight edges as visual opening candidates.
+                    if (collection == "edges" and
+                            (row.get("curve_type") != "Circle" or
+                             len(row.get("face_ids", [])) != 1)):
+                        candidate_result["status"] = "skipped"
+                        candidate_result["reason"] = "not_a_supported_opening_edge"
+                        response["candidate_render_results"].append(candidate_result)
+                        continue
+
+                    try:
+                        rendered = render_views(
+                            folder, stem + "-candidate-" + candidate_id,
+                            resolved_for_candidate(candidate_id, catalog), [], catalog)
+                        for item in rendered:
+                            item["candidate_id"] = candidate_id
+                            item["candidate_kind"] = candidate_kind
+                        candidate_result["images"] = rendered
+                        response["images"].extend(rendered)
+                        try:
+                            require_rendered_views(rendered, ["Selected"])
+                            candidate_result["status"] = "rendered"
+                        except Exception:
+                            candidate_result["status"] = "failed"
+                            candidate_result["validation_error"] = traceback.format_exc()
+                            image_errors = [
+                                item.get("error") for item in rendered
+                                if item.get("error")]
+                            candidate_result["error"] = (
+                                "\n\n".join(image_errors) if image_errors else
+                                candidate_result["validation_error"])
+                    except Exception:
+                        candidate_result["status"] = "failed"
+                        candidate_result["error"] = traceback.format_exc()
+                    response["candidate_render_results"].append(candidate_result)
+            response["candidate_render_summary"] = {
+                "rendered": len([
+                    item for item in response["candidate_render_results"]
+                    if item["status"] == "rendered"]),
+                "failed": len([
+                    item for item in response["candidate_render_results"]
+                    if item["status"] == "failed"]),
+                "skipped": len([
+                    item for item in response["candidate_render_results"]
+                    if item["status"] == "skipped"]),
+            }
     elif operation == "select":
         supplied_catalog = load_catalog(request)
         current_catalog = build_catalog()
