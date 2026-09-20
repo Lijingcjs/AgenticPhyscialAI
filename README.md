@@ -1,8 +1,8 @@
 # CFD Agent
 
 CFD Agent generates Fluent volume meshes from a SpaceClaim CAD file and a natural-language
-prompt. It supports a single connected internal fluid domain with circular
-openings, with human confirmation before meshing. Flow solving is not included.
+prompt. It supports a single connected internal fluid domain with arbitrary planar opening
+contours, with human confirmation before meshing. Flow solving is not included.
 
 The workflow uses LangGraph for orchestration, a language model for interpretation and
 failure diagnosis, SpaceClaim for fluid-domain extraction, and PyFluent for meshing.
@@ -13,22 +13,23 @@ Meshing uses Fluent Watertight Geometry and poly-hexcore.
 - Windows; Python 3.12 is recommended (package metadata allows 3.11–3.13).
 - Ansys 2024 R1 (v241), including SpaceClaim, Fluent, and a valid Ansys license.
 - An existing `.scdoc` file and a nonempty UTF-8 prompt file.
-- Codex CLI installed for the first-time login or later reauthentication.
-- Existing Codex OAuth credentials and access to a compatible image-capable model.
+- Codex CLI installed if using Codex OAuth auto-login.
+- Either existing Codex OAuth credentials or an OpenAI API key, plus access to a compatible
+  image-capable model.
 
-The usual credential location is `%USERPROFILE%\.codex\auth.json`. When the CFD Agent needs
-the model and cannot find a readable cache, it automatically runs `codex login` and opens the
-browser authorization flow. Complete the authorization in the browser; the workflow continues
-after Codex saves the credentials. To use device-code authentication instead, set
+In OAuth mode, the usual credential location is `%USERPROFILE%\.codex\auth.json`. When the CFD
+Agent needs the model and cannot find a readable cache, it automatically runs `codex login` and
+opens the browser authorization flow. Complete the authorization in the browser; the workflow
+continues after Codex saves the credentials. To use device-code authentication instead, set
 `$env:FOAMAGENT_CODEX_DEVICE_AUTH = "1"` before starting the run. If Codex stores credentials
 in the OS keyring rather than `auth.json`, configure its credential store to `file`, or set
 `CODEX_HOME` / `FOAMAGENT_CODEX_AUTH_PATH` to a readable file-based cache.
 
-The workflow currently uses Codex OAuth only; API-key authentication and other model providers
-are not integrated. OAuth caches contain access tokens and must never be committed to GitHub or
-copied into chat messages.
+OAuth caches contain access tokens and must never be committed to GitHub or copied into chat
+messages. API Key mode reads `OPENAI_API_KEY` from the environment and never stores the key in
+the run metadata or audit files.
 The default model is `gpt-5.6-luna`. `--model` selects another compatible model available
-through the same service; it does not change the provider or authentication method.
+through the selected authentication mode; it does not itself change the authentication mode.
 
 ## Quick start
 
@@ -61,13 +62,46 @@ Specify a reference view when using directions such as left or right.
 
 ### 3. Run
 
+Choose one of the following authentication modes. OAuth is the default, so the first example
+works without adding an authentication argument.
+
+#### Option A: Codex OAuth (default)
+
+If a readable OAuth cache is not available, the agent runs `codex login` and opens the browser
+authorization flow. Complete the authorization once, then the workflow continues.
+
 ```powershell
 .\.venv\Scripts\cfd-agent.exe run `
-  --geometry "C:\CFD-inputs\model.scdoc" `
-  --prompt-file "C:\CFD-inputs\prompt.txt" `
+  --geometry "cfd inputs\no-panel-b.scdoc" `
+  --prompt-file "cfd inputs\prompt.txt" `
   --ui-mode gui `
   --keep-open
 ```
+
+The same mode can be selected explicitly with `--auth-mode codex_oauth`.
+
+#### Option B: OpenAI API Key
+
+Set the API key in the current PowerShell session, then select `api_key`. The key is not passed as
+a command-line argument and is not stored in the run metadata or audit files.
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+.\.venv\Scripts\cfd-agent.exe run `
+  --auth-mode api_key `
+  --geometry "cfd inputs\no-panel-b.scdoc" `
+  --prompt-file "cfd inputs\prompt.txt" `
+  --ui-mode gui `
+  --keep-open
+```
+
+Do not put the key directly in source code, commit it to Git, or paste it into chat. API Key mode
+uses the standard OpenAI Responses API endpoint. The selected model must be available to the
+OpenAI Platform project associated with the key. API Key requests use OpenAI Platform billing,
+separate from ChatGPT subscription credits.
+
+In PowerShell, each continuation backtick must be the last character on its line. The `>>` prompt
+is PowerShell's continuation prompt and should not be copied into the command.
 
 Use `run --help` to see all options. The default UI mode is `hidden`, which still requires
 terminal confirmation. `--keep-open` requires `--ui-mode gui`.

@@ -179,9 +179,9 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                     images.append(Path(picture["path"]))
             except Exception as observation_error:
                 evidence["observation_error"] = str(observation_error)
-        client = GroundingLLMClient.from_codex_oauth(
-            model=config_from_state(state).model,
-            timeout_seconds=config_from_state(state).model_timeout_s,
+        settings = config_from_state(state)
+        client = GroundingLLMClient.from_runtime_config(
+            config=settings,
             audit_dir=_run_dir(state) / "llm" / "reviewer",
         )
         if images:

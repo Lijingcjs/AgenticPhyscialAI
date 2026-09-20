@@ -187,6 +187,8 @@ def test_cli_passes_model_and_overwrite_to_api(monkeypatch, tmp_path):
                 "prompt.txt",
                 "--model",
                 "chosen-model",
+                "--auth-mode",
+                "api_key",
                 "--output",
                 str(tmp_path),
                 "--overwrite",
@@ -195,6 +197,7 @@ def test_cli_passes_model_and_overwrite_to_api(monkeypatch, tmp_path):
         == 0
     )
     assert calls[0]["runtime_config"].model == "chosen-model"
+    assert calls[0]["runtime_config"].auth_mode == "api_key"
     assert calls[0]["overwrite"] is True
     assert calls[0]["prompt_path"] == Path("prompt.txt")
     assert "prompt" not in calls[0]

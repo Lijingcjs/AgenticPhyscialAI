@@ -113,6 +113,47 @@ def test_device_auth_mode_is_forwarded_to_codex_cli(monkeypatch):
     assert login_calls == [["codex", "login", "--device-auth"]]
 
 
+def test_openai_api_key_transport_uses_standard_bearer_header():
+    from cfd_agent.adapters.llm import OpenAIAPIKeyResponsesTransport
+
+    transport = OpenAIAPIKeyResponsesTransport("sk-test-only")
+
+    assert transport._headers() == {
+        "Authorization": "Bearer sk-test-only",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "User-Agent": "CFD-Agent",
+    }
+
+
+def test_runtime_config_selects_api_key_client(monkeypatch):
+    from cfd_agent.adapters import llm
+    from cfd_agent.config import RuntimeConfig
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    monkeypatch.setattr(
+        llm,
+        "OpenAIAPIKeyResponsesTransport",
+        lambda *args, **kwargs: object(),
+    )
+
+    client = llm.GroundingLLMClient.from_runtime_config(
+        config=RuntimeConfig(model="api-model", auth_mode="api_key")
+    )
+
+    assert client.provider == "openai-api-key"
+    assert client.model == "api-model"
+
+
+def test_api_key_mode_requires_environment_variable(monkeypatch):
+    from cfd_agent.adapters import llm
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        llm.GroundingLLMClient.from_openai_api_key(model="api-model")
+
+
 def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, monkeypatch):
     from cfd_agent.adapters.llm import GroundingLLMClient
     from cfd_agent.config import RuntimeConfig
