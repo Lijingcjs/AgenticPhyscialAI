@@ -1,9 +1,9 @@
 """Minimal multimodal LLM client for CFD agent.
 
-It uses the Codex OAuth Responses transport with rich image
+It supports Codex OAuth and OpenAI API Key Responses transports with rich image
 content and strict Pydantic validation. Local audit records include prompt text
-and model output; OAuth headers and image bytes are excluded. Bearer tokens and
-image data URLs are redacted from recorded text.
+and model output; authentication headers and image bytes are excluded. Bearer
+tokens and image data URLs are redacted from recorded text.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -24,7 +26,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, ValidationError
 
-from cfd_agent.config import PRODUCTION_MODEL
+from cfd_agent.config import PRODUCTION_MODEL, RuntimeConfig
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -73,6 +75,10 @@ class VisionProbeResult:
 
 class GroundingLLMError(RuntimeError):
     """Base class for model-client failures."""
+
+
+class CodexOAuthLoginError(GroundingLLMError):
+    """The Codex CLI login flow could not create a readable OAuth cache."""
 
 
 class StructuredOutputError(GroundingLLMError):
@@ -261,6 +267,75 @@ def load_codex_oauth(auth_path: str | Path | None = None) -> CodexOAuthCredentia
     raise FileNotFoundError("No Codex OAuth cache was found")
 
 
+def load_openai_api_key(api_key: str | None = None) -> str:
+    """Load an OpenAI API key from an explicit value or OPENAI_API_KEY."""
+
+    value = api_key or os.getenv("OPENAI_API_KEY")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "OpenAI API Key mode requires the OPENAI_API_KEY environment variable"
+        )
+    return value.strip()
+
+
+def _device_auth_requested() -> bool:
+    value = os.getenv("FOAMAGENT_CODEX_DEVICE_AUTH", "")
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _run_codex_login(*, device_auth: bool = False) -> None:
+    """Delegate browser/device authentication to the installed Codex CLI."""
+
+    executable = shutil.which("codex")
+    if executable is None:
+        raise CodexOAuthLoginError(
+            "Codex OAuth credentials are missing and the 'codex' CLI was not found. "
+            "Install Codex CLI, then run the CFD Agent again."
+        )
+
+    command = [executable, "login"]
+    if device_auth:
+        command.append("--device-auth")
+        print("[Auth] Starting Codex device-code login. Complete authorization in your browser.")
+    else:
+        print("[Auth] Starting Codex login. Complete authorization in the browser window.")
+
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as error:
+        raise CodexOAuthLoginError(f"Could not start Codex login: {type(error).__name__}") from error
+    if result.returncode != 0:
+        raise CodexOAuthLoginError(
+            f"Codex login failed with exit code {result.returncode}. "
+            "Run 'codex login' manually and try again."
+        )
+
+
+def ensure_codex_oauth(
+    auth_path: str | Path | None = None,
+    *,
+    device_auth: bool | None = None,
+) -> CodexOAuthCredentials:
+    """Load OAuth credentials, starting Codex login once when the cache is absent."""
+
+    try:
+        return load_codex_oauth(auth_path)
+    except FileNotFoundError as missing:
+        _run_codex_login(
+            device_auth=_device_auth_requested() if device_auth is None else device_auth
+        )
+        try:
+            return load_codex_oauth(auth_path)
+        except (FileNotFoundError, ValueError) as error:
+            raise CodexOAuthLoginError(
+                "Codex login completed, but CFD Agent still cannot read an OAuth cache. "
+                "Ensure Codex stores credentials in auth.json and that CODEX_HOME or "
+                "FOAMAGENT_CODEX_AUTH_PATH points to it."
+            ) from error
+    except ValueError:
+        raise
+
+
 def _extract_output_text(response_json: dict[str, Any]) -> str:
     output_text = response_json.get("output_text")
     if isinstance(output_text, str):
@@ -416,6 +491,33 @@ class CodexOAuthResponsesTransport:
         return "".join(chunks).strip()
 
 
+class OpenAIAPIKeyResponsesTransport(CodexOAuthResponsesTransport):
+    """Streaming transport for the public OpenAI Responses API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = "https://api.openai.com/v1",
+        timeout_seconds: int | None = None,
+        session: requests.Session | None = None,
+    ) -> None:
+        super().__init__(
+            CodexOAuthCredentials(api_key),
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            session=session,
+        )
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._credentials.access_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "CFD-Agent",
+        }
+
+
 class _VisionProbeAnswer(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -486,12 +588,15 @@ class GroundingLLMClient:
         *,
         model: str = PRODUCTION_MODEL,
         auth_path: str | Path | None = None,
+        auto_login: bool = True,
         instructions: str = _DEFAULT_INSTRUCTIONS,
         base_url: str = "https://chatgpt.com/backend-api/codex",
         timeout_seconds: int | None = None,
         audit_dir: str | Path | None = None,
     ) -> "GroundingLLMClient":
-        credentials = load_codex_oauth(auth_path)
+        credentials = (
+            ensure_codex_oauth(auth_path) if auto_login else load_codex_oauth(auth_path)
+        )
         transport = CodexOAuthResponsesTransport(
             credentials,
             base_url=base_url,
@@ -501,6 +606,52 @@ class GroundingLLMClient:
             model=model,
             transport=transport,
             instructions=instructions,
+            audit_dir=audit_dir,
+        )
+
+    @classmethod
+    def from_openai_api_key(
+        cls,
+        *,
+        model: str = PRODUCTION_MODEL,
+        api_key: str | None = None,
+        instructions: str = _DEFAULT_INSTRUCTIONS,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+        audit_dir: str | Path | None = None,
+    ) -> "GroundingLLMClient":
+        key = load_openai_api_key(api_key)
+        transport = OpenAIAPIKeyResponsesTransport(
+            key,
+            base_url=base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            timeout_seconds=timeout_seconds,
+        )
+        return cls(
+            model=model,
+            transport=transport,
+            instructions=instructions,
+            provider="openai-api-key",
+            audit_dir=audit_dir,
+        )
+
+    @classmethod
+    def from_runtime_config(
+        cls,
+        *,
+        config: RuntimeConfig,
+        audit_dir: str | Path | None = None,
+    ) -> "GroundingLLMClient":
+        """Create the configured model client without placing secrets in RuntimeConfig."""
+
+        if config.auth_mode == "api_key":
+            return cls.from_openai_api_key(
+                model=config.model,
+                timeout_seconds=config.model_timeout_s,
+                audit_dir=audit_dir,
+            )
+        return cls.from_codex_oauth(
+            model=config.model,
+            timeout_seconds=config.model_timeout_s,
             audit_dir=audit_dir,
         )
 
@@ -787,6 +938,7 @@ class GroundingLLMClient:
 
 __all__ = [
     "CodexOAuthCredentials",
+    "CodexOAuthLoginError",
     "CodexOAuthResponsesTransport",
     "GroundingLLMClient",
     "GroundingLLMError",
@@ -799,5 +951,8 @@ __all__ = [
     "VisionProbeResult",
     "VisionStatus",
     "VisionUnavailableError",
+    "ensure_codex_oauth",
+    "load_openai_api_key",
     "load_codex_oauth",
+    "OpenAIAPIKeyResponsesTransport",
 ]

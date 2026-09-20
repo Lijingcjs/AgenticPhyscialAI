@@ -69,9 +69,8 @@ def plan_cad_selection(
     config: RuntimeConfig | None = None,
 ) -> CadSelectionPlan:
     settings = config or RuntimeConfig()
-    client = GroundingLLMClient.from_codex_oauth(
-        model=settings.model,
-        timeout_seconds=settings.model_timeout_s,
+    client = GroundingLLMClient.from_runtime_config(
+        config=settings,
         audit_dir=Path(audit_dir) / "selection",
     )
     images = _model_images(catalog)
@@ -121,9 +120,8 @@ def extract_mesh_requirements(
     config: RuntimeConfig | None = None,
 ) -> MeshRequirements:
     settings = config or RuntimeConfig()
-    client = GroundingLLMClient.from_codex_oauth(
-        model=settings.model,
-        timeout_seconds=settings.model_timeout_s,
+    client = GroundingLLMClient.from_runtime_config(
+        config=settings,
         audit_dir=Path(audit_dir) / "requirements",
     )
     body_boxes = [item.bbox.model_dump() for item in catalog.bodies if item.bbox is not None]

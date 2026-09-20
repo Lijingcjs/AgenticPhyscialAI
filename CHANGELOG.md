@@ -1,5 +1,23 @@
 # 修改记录
 
+## 2026-09-20 — 增加 OpenAI API Key 调用方式
+
+- 增加 `api_key` 认证模式，保留 Codex OAuth 作为默认模式。
+- API Key 从 `OPENAI_API_KEY` 环境变量读取，不进入运行配置、审计记录或命令行参数。
+- 增加标准 OpenAI Responses API transport，继续支持图片输入、流式输出和结构化 JSON 响应。
+- 增加 CLI 参数 `--auth-mode api_key`，用于选择 API Key 调用方式。
+- 增加 API Key 请求头、认证模式选择和缺少环境变量的单元测试。
+- 更新 README，补充 API Key 的配置方法和安全注意事项。
+
+## 2026-09-20 — 缺少 OAuth 凭据时自动启动 Codex 登录
+
+- 模型客户端找不到可读取的 Codex OAuth 缓存时，自动调用 `codex login`。
+- 登录过程交给 Codex CLI 处理，用户在浏览器中完成授权后，程序重新读取凭据并继续运行。
+- 支持通过 `FOAMAGENT_CODEX_DEVICE_AUTH=1` 使用设备码登录，适用于无本地浏览器或 localhost 回调受阻的环境。
+- 登录失败、未安装 Codex CLI 或登录后仍找不到 `auth.json` 时，输出明确错误，不会读取或打印用户密码和访问令牌。
+- README 增加首次登录、设备码登录、凭据文件位置和安全注意事项。
+- 增加单元测试，覆盖浏览器登录触发和设备码登录失败处理。
+
 ## 2026-09-19 — 支持任意形状进出口
 
 ### 问题原因

@@ -105,6 +105,12 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--model", default=PRODUCTION_MODEL, help="Model name for the configured provider"
     )
+    run.add_argument(
+        "--auth-mode",
+        choices=["codex_oauth", "api_key"],
+        default="codex_oauth",
+        help="Model authentication: Codex OAuth or OpenAI API key",
+    )
     run.add_argument("--ui-mode", choices=["gui", "hidden"], default="hidden")
     run.add_argument("--keep-open", action="store_true")
     run.add_argument("--max-repair-rounds", type=int, default=10)
@@ -136,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_repair_rounds=args.max_repair_rounds,
                 runtime_config=RuntimeConfig(
                     model=args.model,
+                    auth_mode=args.auth_mode,
                     ansys_root=args.ansys_root,
                     runtime_root=args.runtime_root,
                     processor_count=args.processors,
