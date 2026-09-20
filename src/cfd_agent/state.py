@@ -40,6 +40,8 @@ class PipelineState(TypedDict, total=False):
     fluent_job: dict[str, Any]
     fluent_steps: dict[str, Any]
     repair_decision: dict[str, Any]
+    repair_decision_source: Literal["llm", "system"]
+    repair_stop_reason: str
     repair_history: list[dict[str, Any]]
     parameter_confirmation: dict[str, Any]
     artifacts: dict[str, str]
