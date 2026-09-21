@@ -31,6 +31,7 @@ class PipelineState(TypedDict, total=False):
     selection_plan: dict[str, Any]
     mesh_requirements: dict[str, Any]
     native_selection: dict[str, Any]
+    fluid_volume_mode: Literal["existing_fluid_body", "volume_extract"]
     extraction: dict[str, Any]
     labeling: dict[str, Any]
     cad_validation: dict[str, Any]
