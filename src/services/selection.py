@@ -17,9 +17,35 @@ from src.services.contracts import (
     CandidateDetailRequest,
     FluidBodySelection,
     MeshRequirements,
+    MeshTargetMapping,
 )
 from src.services.errors import PipelineError
 from src.services.geometry_catalog import GeometryCatalog
+
+
+def map_mesh_targets(*, targets: list[str], context: dict[str, Any], audit_dir: Path, config: RuntimeConfig) -> dict[str, str]:
+    """Resolve saved-CAD targets from user intent and before/after group evidence."""
+    client = GroundingLLMClient.from_runtime_config(config=config, audit_dir=audit_dir / "mesh-target-mapping")
+    answer = client.invoke(
+        system_prompt=(
+            "Map each unresolved meshing target to exactly one existing saved CAD group. "
+            "Use the original user request, meshing requirements, previous groups and geometry, "
+            "and current groups, roles and geometry. Names alone do not prove identity. "
+            "Only return mappings for unresolved_targets; do not change numeric settings or roles. "
+            "If a target cannot be determined from the evidence, omit it and explain why; do not guess."
+        ),
+        user_prompt=json.dumps({"unresolved_targets": targets, **context}, ensure_ascii=False),
+        response_model=MeshTargetMapping,
+    )
+    if set(answer.mapping) != set(targets):
+        raise PipelineError(
+            "CAD_MESH_TARGET_MAPPING_UNRESOLVED",
+            "The model could not determine every saved CAD meshing target.",
+            stage="reload_confirmed_cad",
+            evidence={"targets": targets, **answer.model_dump(mode="json")},
+            suggested_action="Inspect the mapping record and clarify the target groups in the CAD or requirements.",
+        )
+    return answer.mapping
 
 
 def _model_images(catalog: GeometryCatalog) -> list[Path]:
@@ -789,18 +815,20 @@ def extract_mesh_requirements(
         system_prompt=(
             "Extract Fluent Meshing requirements from the user's request.\n"
             "\n"
-            "Record numeric values only when the user states them. Leave omitted controls as null so\n"
-            "Fluent can use its native defaults. If a qualitative requirement necessarily needs a\n"
-            "number, you may propose one using the supplied geometry scale; mark it as inferred and\n"
-            "explain the basis. For local sizing, map the target to one of the supplied boundary-group\n"
-            "names or leave boundary_name null when the request is not uniquely mappable.\n"
-            "Mark explicitly supplied numeric controls as source=user, and proposed values as\n"
-            "source=inferred. Changing a user-specified control requires human approval.\n"
+            "Preserve explicit user values. You may propose missing numeric controls from the user intent and geometry scale;\n"
+            "mark each proposal source=inferred and explain the rationale in basis. Leave null when no justified proposal is available.\n"
+            "If an explicitly requested operation cannot proceed with defaults, report missing_information.\n"
+            "Use surface_min_size, surface_max_size and volume_max_size independently. Never copy one value into another\n"
+            "unless the user explicitly applies it to both. Resolve ambiguous scope from context; otherwise ask for clarification.\n"
+            "Local refinement size, min_size and max_size are independent; leave each unspecified field null.\n"
+            "Map local targets to supplied group names. Mark explicit values source=user and proposed values source=inferred.\n"
+            "Do not create local refinement entries with no requested numeric size control.\n"
+            "Leave boundary-layer target and boundary_names null when unspecified; do not default to all walls.\n"
             "For boundary-layer count and growth rate, populate the matching *_source field whenever\n"
-            "you populate the number; otherwise leave both null.\n"
+            "you populate the number; otherwise leave both null. Inferred counts/rates must include layers_basis/growth_rate_basis.\n"
             "Use layers=0 only when the user explicitly disables boundary layers. Otherwise leave\n"
             "unspecified values null, including the layer count. For a requested subset of walls,\n"
-            "populate boundary_names with the supplied names, or retain the target description if it\n"
+            "populate boundary_names only for explicitly requested targets, or retain the target description if it\n"
             "cannot be bound. Never replace a specific target by \"all walls\". Boundary-layer growth\n"
             "rate affects boundary layers only. Accept any unambiguous length unit in user text, convert\n"
             "each numeric length to metres (unit=m), preserve original_expression and explain the conversion in basis.\n"
@@ -809,7 +837,13 @@ def extract_mesh_requirements(
             "in unsupported_requirements instead of silently substituting defaults. Report missing or\n"
             "ambiguous units in missing_information and leave the affected control null; never guess units.\n"
             "\n"
+            "Extract explicitly requested Fluent boundary types into boundary_types, keyed by actual supplied group name.\n"
+            "Do not confuse inlet/outlet roles with native types; do not change a specified native type. Omit unspecified types.\n"
             "length_unit is an explicit Fluent import-unit request, not the unit used by the\n"
+            "numeric controls. Use the Fluent unit name requested by the user, without a project unit whitelist.\n"
+            "Populate quality thresholds only when explicitly requested by the user; otherwise return an empty quality object.\n"
+            "Never invent minimum orthogonal quality or maximum skewness thresholds.\n"
+            "The import unit is not determined by the\n"
             "geometry catalog. If the user does not request an import unit, return null. Do not\n"
             "copy the catalog's metres into this field. Keep notes limited to meshing requirements;\n"
             "do not repeat CAD selection/extraction instructions or boundary-role assignments.\n"

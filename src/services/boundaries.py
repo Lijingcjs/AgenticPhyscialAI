@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from typing import Any
 
+from src.services.contracts import resolve_boundary_types
 from src.services.errors import PipelineError
 from src.services.geometry_catalog import GeometryCatalog
 from src.services.units import control_in_metres
@@ -43,10 +45,6 @@ def confirm_roles(
         raise ValueError("Boundary roles refer to absent confirmed groups: " + ", ".join(extra))
     if invalid:
         raise ValueError("Unsupported boundary roles for: " + ", ".join(invalid))
-    if not any(role == "inlet" for role in roles.values()):
-        raise ValueError("Confirmed groups contain no inlet")
-    if not any(role == "outlet" for role in roles.values()):
-        raise ValueError("Confirmed groups contain no outlet")
     return roles
 
 
@@ -136,16 +134,6 @@ def validate_confirmed_cad(
             objects=[{"candidate_id": face_id} for face_id in missing_faces],
             suggested_action="Assign every ungrouped fluid face to an inlet, outlet, wall, or symmetry group.",
         )
-    if not any(role == "inlet" for role in roles.values()) or not any(
-        role == "outlet" for role in roles.values()
-    ):
-        raise PipelineError(
-            "CAD_CONFIRMED_TERMINAL_ROLE_MISSING",
-            "Confirmed boundary groups must include both inlet and outlet roles.",
-            stage="reload_confirmed_cad",
-            substep="boundary-role validation",
-            suggested_action="Set one group to inlet and another group to outlet.",
-        )
     return {
         "positive_volume": True,
         "nonempty_groups": True,
@@ -164,7 +152,7 @@ def build_fluent_job(
     boundaries = {role: [] for role in ALLOWED_ROLES}
     for name, role in roles.items():
         boundaries[role].append(name)
-    global_control = requirements.get("global_size")
+    global_control = requirements.get("surface_max_size")
     layers = requirements.get("boundary_layers") or {}
     layer_zones = resolve_layer_zones(layers, roles)
     return {
@@ -173,28 +161,29 @@ def build_fluent_job(
         "length_unit": requirements.get("length_unit"),
         "control_unit": "m",
         "boundaries": boundaries,
-        "global_size": control_in_metres(global_control),
+        "boundary_types": resolve_boundary_types(roles, requirements.get("boundary_types") or {}),
+        "surface_max_size": control_in_metres(global_control),
+        "surface_min_size": control_in_metres(requirements.get("surface_min_size")),
+        "volume_max_size": control_in_metres(requirements.get("volume_max_size")),
         "local_refinements": [
             {
                 "target": item["target"],
-                "size": control_in_metres(item["size"]),
+                **{key: control_in_metres(item.get(key)) for key in ("size", "min_size", "max_size")},
                 "zone": item.get("boundary_name"),
             }
             for item in requirements.get("local_refinements", [])
+            if any(item.get(key) is not None for key in ("size", "min_size", "max_size"))
         ],
         "boundary_layers": {
             "zones": layer_zones,
-            "scope_specified": bool(layers) and layers.get("layers") != 0,
+            "scope_specified": (layers.get("boundary_names") is not None or layers.get("target") is not None) and layers.get("layers") != 0,
             "layers": layers.get("layers"),
             "growth_rate": layers.get("growth_rate"),
             "first_layer_height": control_in_metres(layers.get("first_layer_height")),
         },
         "parameter_sources": copy.deepcopy(requirements),
         "volume_fill": "poly-hexcore",
-        "quality": {
-            "min_orthogonal_quality": 0.1,
-            "max_skewness": 0.95,
-        },
+        "quality": dict(requirements.get("quality") or {}),
     }
 
 
@@ -203,7 +192,9 @@ def resolve_layer_zones(layers: dict, roles: dict[str, str]) -> list[str]:
         return []
     names = layers.get("boundary_names")
     if names is None:
-        target = layers.get("target", "all walls")
+        target = layers.get("target")
+        if target is None:
+            return []
         names = (
             [name for name, role in roles.items() if role == "wall"]
             if target == "all walls"
@@ -218,8 +209,9 @@ def rebind_mesh_targets(
     previous_groups: list[dict],
     confirmed_catalog: GeometryCatalog,
     roles: dict[str, str],
+    resolve_missing: Callable[[list[str]], dict[str, str]] | None = None,
 ) -> dict:
-    """Preserve identity across group renames, never infer a different face set."""
+    """Follow native membership first, then resolve uncertain targets as one batch."""
     result = copy.deepcopy(requirements)
     groups = named_groups(confirmed_catalog)
     objects = confirmed_catalog.by_id()
@@ -228,33 +220,62 @@ def rebind_mesh_targets(
         for name, members in groups.items()
     }
     previous = {row["name"]: set(row["member_monikers"]) for row in previous_groups}
+    unresolved: set[str] = set()
+    bindings: list[tuple[dict | list, str | int, str]] = []
 
-    def resolve(name: str | None, target: str, *, required: bool = True) -> str:
+    def resolve(name: str | None, target: str) -> str:
         requested = name or target
-        if requested in roles:
-            return requested
         members = previous.get(requested)
+        if requested in roles and requested in groups and (
+            members and None not in members and current[requested] == members
+        ):
+            return requested
         matches = [
             name
             for name, values in current.items()
             if members and None not in members and values == members
         ]
         if len(matches) != 1:
-            if not required:
-                return requested
-            raise ValueError(
-                "Cannot uniquely bind meshing target after CAD confirmation: " + requested
-            )
+            unresolved.add(requested)
+            return requested
         return matches[0]
 
     for item in result.get("local_refinements", []):
+        bindings.append((item, "boundary_name", item.get("boundary_name") or item["target"]))
         item["boundary_name"] = resolve(item.get("boundary_name"), item["target"])
     layers = result.get("boundary_layers")
     if layers and layers.get("layers") != 0:
         names = layers.get("boundary_names")
+        if names is None and layers.get("target") not in (None, "all walls"):
+            names = [layers["target"]]
         if names is not None:
-            layers["boundary_names"] = [resolve(name, name, required=False) for name in names]
-        elif layers.get("target", "all walls") != "all walls":
-            layers["boundary_names"] = [resolve(None, layers["target"], required=False)]
+            layers["boundary_names"] = [resolve(name, name) for name in names]
+            bindings.extend((layers["boundary_names"], index, name) for index, name in enumerate(names))
         resolve_layer_zones(layers, roles)
+    type_bindings = [
+        {"name": resolve(name, name), "type": value}
+        for name, value in result.get("boundary_types", {}).items()
+    ]
+    bindings.extend((row, "name", name) for row, name in zip(type_bindings, result.get("boundary_types", {}), strict=True))
+    if unresolved:
+        if resolve_missing is None:
+            raise ValueError("Cannot uniquely bind meshing target after CAD confirmation: " + ", ".join(sorted(unresolved)))
+        mapping = resolve_missing(sorted(unresolved))
+        if set(mapping) != unresolved or any(name not in groups or name not in roles for name in mapping.values()):
+            raise PipelineError(
+                "CAD_MESH_TARGET_MAPPING_INVALID",
+                "The model must map every unresolved meshing target to an existing saved CAD group.",
+                stage="reload_confirmed_cad", evidence={"targets": sorted(unresolved), "mapping": mapping},
+            )
+        for container, key, original in bindings:
+            if original in unresolved:
+                container[key] = mapping[original]
+    if "boundary_types" in result:
+        rebound = {}
+        for row in type_bindings:
+            if row["name"] in rebound and rebound[row["name"]] != row["type"]:
+                raise ValueError("Conflicting boundary types map to the same saved CAD group")
+            rebound[row["name"]] = row["type"]
+        resolve_boundary_types(roles, rebound)
+        result["boundary_types"] = rebound
     return result

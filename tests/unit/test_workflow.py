@@ -141,16 +141,16 @@ def test_fluent_repair_reports_earliest_invalidated_step(tmp_path: Path):
             "geometry_path": str(geometry),
             "length_unit": "mm",
             "boundaries": {"inlet": ["inlet"], "outlet": ["outlet"], "wall": ["wall"]},
-            "global_size": 10.0,
+            "surface_max_size": 10.0,
             "local_refinements": [],
             "boundary_layers": {},
             "quality": {"min_orthogonal_quality": 0.1, "max_skewness": 0.95},
         }
     )
     controls = RepairState(job)
-    step, _ = controls.apply("set_global_size", {"value": 5.0}, set())
+    step, _ = controls.apply("set_surface_max_size", {"value": 5.0}, set())
     assert step == "surface_mesh"
-    assert controls.global_size == 5.0
+    assert controls.surface_max_size == 5.0
 
 
 def test_reviewer_retry_cannot_silently_ignore_parameters():
@@ -168,7 +168,7 @@ def test_fluent_review_uses_structured_requirements_without_old_cad_notes():
     from src.services.reviewer import fluent_review_inputs
 
     state = {
-        "mesh_requirements": {"global_size": {"value": 10}, "notes": ["old CAD instructions"]},
+        "mesh_requirements": {"surface_max_size": {"value": 10}, "notes": ["old CAD instructions"]},
         "fluent_job": {
             "parameter_sources": {"notes": ["old CAD instructions"]},
             "boundaries": {"inlet": ["edited_name"]},
@@ -258,7 +258,7 @@ def test_cancel_ends_graph_without_review_or_cad_reload(tmp_path, monkeypatch):
                 "verify_selection",
                 {},
         ),
-        ("extract_volume", "set_global_size", "surface_mesh", {"value": 1}),
+        ("extract_volume", "set_surface_max_size", "surface_mesh", {"value": 1}),
         ("surface_mesh", "set_layer_count", "boundary_layers", {"value": 3}),
         ("query_geometry", "return_to_human", "human_confirmation", {}),
     ],
@@ -294,8 +294,8 @@ def test_invalid_repair_routes_stop_before_software(
     "action,target,parameters,expected",
     [
         ("retry_step", "volume_mesh", {}, "volume_mesh"),
-        ("set_global_size", "surface_mesh", {"value": 1}, "surface_mesh"),
-        ("set_global_size", "volume_mesh", {"value": 1}, "surface_mesh"),
+        ("set_surface_max_size", "surface_mesh", {"value": 1}, "surface_mesh"),
+        ("set_surface_max_size", "volume_mesh", {"value": 1}, "surface_mesh"),
     ],
 )
 def test_fluent_repairs_resume_failed_or_affected_step(

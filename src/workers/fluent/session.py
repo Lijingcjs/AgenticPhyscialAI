@@ -76,11 +76,20 @@ class FluentWorker:
                 "names": sorted(self.runner.available_names()) if self.runner else [],
                 "healthy": bool(self.session and self.session.is_server_healthy()),
             }
+        if operation == "verify_reference_identity":
+            if self.runner is None:
+                raise RuntimeError("Fluent has not been launched")
+            return self.runner.verify_reference_identity(data["action"], data.get("parameters", {}))
         if operation == "repair":
             if self.runner is None or self.controls is None:
                 raise RuntimeError("Fluent has not been launched")
             action = data["action"]
             target = data["target_step"]
+            identity = {"verified": False}
+            if action in {"replace_zone_reference", "set_layer_targets"} and not data.get("manual_approved"):
+                identity = self.runner.verify_reference_identity(action, data.get("parameters", {}))
+            elif action in {"replace_zone_reference", "set_layer_targets", "set_local_size", "set_local_min_size", "set_local_max_size"}:
+                self.runner.refresh_labels()
             available = self.runner.available_names()
             earliest, description = self.controls.apply(
                 action,
@@ -88,6 +97,7 @@ class FluentWorker:
                 available,
                 available_names_by_category=self.runner.available_names_by_category(),
                 manual_approved=bool(data.get("manual_approved")),
+                identity_verified=bool(identity["verified"]),
             )
             self.runner.record_repair(action, data.get("parameters", {}))
             resume = target if action == "retry_step" else earliest
@@ -95,6 +105,7 @@ class FluentWorker:
             return {
                 "resume": resume,
                 "description": description,
+                "identity_evidence": identity,
                 "reverted": reverted,
                 "controls": self.controls.snapshot(),
             }

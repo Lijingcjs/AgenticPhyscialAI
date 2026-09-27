@@ -7,6 +7,27 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+BOUNDARY_TYPES_BY_ROLE = {
+    "inlet": ("velocity-inlet", "pressure-inlet", "mass-flow-inlet", "inlet-vent", "intake-fan"),
+    "outlet": ("pressure-outlet", "mass-flow-outlet", "outflow", "outlet-vent", "exhaust-fan"),
+    "wall": ("wall",),
+    "symmetry": ("symmetry",),
+}
+BoundaryType = Literal[*tuple(value for values in BOUNDARY_TYPES_BY_ROLE.values() for value in values)]
+
+
+def resolve_boundary_types(roles: dict[str, str], requested: dict[str, str]) -> dict[str, str]:
+    if set(requested) - set(roles):
+        raise ValueError("Boundary types reference absent groups")
+    result = {}
+    for name, role in roles.items():
+        allowed = BOUNDARY_TYPES_BY_ROLE[role]
+        value = requested.get(name, allowed[0])
+        if value not in allowed:
+            raise ValueError(f"Boundary type {value} is incompatible with role {role} for {name}")
+        result[name] = value
+    return result
+
 
 class OpeningSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -210,30 +231,43 @@ class NumericControl(BaseModel):
     source: Literal["user", "inferred"]
     basis: str
 
+    @model_validator(mode="after")
+    def inferred_value_has_basis(self):
+        if self.source == "inferred" and not self.basis.strip():
+            raise ValueError("Inferred numeric controls require a recorded basis")
+        return self
+
 
 class LocalRefinement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target: str
     boundary_name: str | None = None
-    size: NumericControl
+    size: NumericControl | None = None
+    min_size: NumericControl | None = None
+    max_size: NumericControl | None = None
 
 
 class BoundaryLayerRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target: str = "all walls"
+    target: str | None = None
     boundary_names: list[str] | None = None
     layers: int | None = None
     layers_source: Literal["user", "inferred"] | None = None
+    layers_basis: str = ""
     growth_rate: float | None = None
     growth_rate_source: Literal["user", "inferred"] | None = None
+    growth_rate_basis: str = ""
     first_layer_height: NumericControl | None = None
 
     @model_validator(mode="after")
     def numeric_sources_are_recorded(self):
         if self.layers == 0 and self.layers_source != "user":
             raise ValueError("Disabling boundary layers requires an explicit user request")
+        for key in ("layers", "growth_rate"):
+            if getattr(self, key + "_source") == "inferred" and not getattr(self, key + "_basis").strip():
+                raise ValueError("Inferred boundary-layer controls require a recorded basis")
         if (self.layers is None) != (self.layers_source is None):
             raise ValueError("layers and layers_source must be supplied together")
         if (self.growth_rate is None) != (self.growth_rate_source is None):
@@ -245,14 +279,19 @@ class MeshRequirements(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     flow_type: Literal["internal"] = "internal"
-    length_unit: Literal["m", "cm", "mm", "in", "ft"] | None = None
-    global_size: NumericControl | None = None
+    length_unit: str | None = None
+    quality: dict[Literal["min_orthogonal_quality", "max_skewness"], float] = Field(default_factory=dict)
+    boundary_types: dict[str, BoundaryType] = Field(default_factory=dict)
+    surface_max_size: NumericControl | None = None
+    surface_min_size: NumericControl | None = None
+    volume_max_size: NumericControl | None = None
     local_refinements: list[LocalRefinement] = Field(default_factory=list)
     boundary_layers: BoundaryLayerRequest | None = None
     volume_method: Literal["poly-hexcore"] = "poly-hexcore"
     notes: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
     unsupported_requirements: list[str] = Field(default_factory=list)
+
 
 
 class EmptyRepairParameters(BaseModel):
@@ -299,7 +338,7 @@ class RepairActionSpec:
     resume_step: str | None = None
     approval: Literal["none", "user_parameter", "boundary_mapping"] = "none"
     user_parameter: Literal[
-        "global_size", "local_size", "growth_rate", "layer_count", "first_layer_height"
+        "surface_max_size", "surface_min_size", "volume_max_size", "local_size", "local_min_size", "local_max_size", "growth_rate", "layer_count", "first_layer_height"
     ] | None = None
     worker_handler: str | None = None
     resume_parameter: str | None = None
@@ -320,17 +359,34 @@ class RepairActionSpec:
 
 
 REPAIR_ACTIONS: dict[str, RepairActionSpec] = {
+    "set_surface_min_size": RepairActionSpec(
+        ValueParameters, route="fluent", resume_step="surface_mesh", approval="user_parameter",
+        user_parameter="surface_min_size", worker_handler="_apply_surface_min_size",
+    ),
+    "set_volume_max_size": RepairActionSpec(
+        ValueParameters, route="fluent", resume_step="volume_mesh", approval="user_parameter",
+        user_parameter="volume_max_size", worker_handler="_apply_volume_max_size",
+    ),
+    "set_local_min_size": RepairActionSpec(
+        LocalSizeParameters, route="fluent", resume_step="local_sizing", approval="user_parameter",
+        user_parameter="local_min_size", worker_handler="_apply_local_min_size",
+    ),
+    "set_local_max_size": RepairActionSpec(
+        LocalSizeParameters, route="fluent", resume_step="local_sizing", approval="user_parameter",
+        user_parameter="local_max_size", worker_handler="_apply_local_max_size",
+    ),
+
     "retry_step": RepairActionSpec(
         EmptyRepairParameters, route="retry", worker_handler="_apply_retry"
     ),
     "reselect_cad": RepairActionSpec(EmptyRepairParameters, route="cad"),
-    "set_global_size": RepairActionSpec(
+    "set_surface_max_size": RepairActionSpec(
         ValueParameters,
         route="fluent",
         resume_step="surface_mesh",
         approval="user_parameter",
-        user_parameter="global_size",
-        worker_handler="_apply_global_size",
+        user_parameter="surface_max_size",
+        worker_handler="_apply_surface_max_size",
     ),
     "set_local_size": RepairActionSpec(
         LocalSizeParameters,
@@ -448,6 +504,13 @@ class RepairDecision(BaseModel):
     def parameters_match_tool(self):
         repair_action_spec(self.action).parameters.model_validate(self.parameters)
         return self
+
+
+class MeshTargetMapping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mapping: dict[str, str] = Field(default_factory=dict)
+    explanation: str
 
 
 class ConfirmationPayload(BaseModel):

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.services.artifacts import write_json
-from src.services.units import METRES_PER_UNIT
+from src.services.contracts import BOUNDARY_TYPES_BY_ROLE, resolve_boundary_types
 
 from .job import MeshJob
 from .repair import STEP_ORDER, RepairState
@@ -178,13 +178,19 @@ class WatertightMeshingRunner:
 
     def record_repair(self, action: str, parameters: dict) -> None:
         key = {
-            "set_global_size": "global_size",
+            "set_surface_max_size": "surface_max_size",
+            "set_surface_min_size": "surface_min_size",
+            "set_volume_max_size": "volume_max_size",
+            "set_local_min_size": "local_refinements",
+            "set_local_max_size": "local_refinements",
             "set_local_size": "local_refinements",
             "set_growth_rate": "boundary_layers.growth_rate",
             "set_layer_count": "boundary_layers.layers",
             "set_first_layer_height": "boundary_layers.first_layer_height",
             "set_layer_targets": "boundary_layers.zones",
         }.get(action)
+        if action in {"set_local_size", "set_local_min_size", "set_local_max_size"}:
+            key = f"local_refinements.{parameters['zone']}.{action.removeprefix('set_local_')}"
         if key:
             self.repaired_sources[key] = action
         self.parameter_record["history"].append({"repair": action, "parameters": parameters})
@@ -252,6 +258,8 @@ class WatertightMeshingRunner:
         return result
 
     def observe(self, step: str, task: Any | None, result: Any = None) -> dict[str, Any]:
+        if hasattr(self, "_live_label_observations"):
+            del self._live_label_observations
         observation = {
             "step": step,
             "at": utc_now(),
@@ -303,10 +311,14 @@ class WatertightMeshingRunner:
         return observation
 
     def execute_step(self, step: str) -> dict[str, Any]:
+        if step in {"import_geometry", "surface_mesh", "update_regions", "boundary_layers", "volume_mesh"}:
+            self._boundary_identities = {}
         self.event_callback(step, f"Starting step {step}.")
         handler = getattr(self, f"_step_{step}")
         try:
             observation = handler()
+            if step == "update_boundaries":
+                self._remember_boundary_identities()
         except Exception as error:
             controls = self.repair_state.snapshot()
             if isinstance(error, StepExecutionError):
@@ -331,8 +343,6 @@ class WatertightMeshingRunner:
         if self.job.length_unit is not None:
             set_task_value(task, "length_unit", self.job.length_unit)
         unit = task.length_unit.get_state()
-        if unit not in METRES_PER_UNIT:
-            raise ValueError("Fluent returned an unsupported length unit: " + str(unit))
         self.repair_state.resolve_units(unit)
         self._capture(
             "import_geometry.length_unit",
@@ -359,36 +369,21 @@ class WatertightMeshingRunner:
                         f"local-size-{self.step_attempts['local_sizing']}-{index}"
                     )
                 control.boi_execution = "Face Size"
-                control.boi_size = refinement["size"]
-                control.boi_min_size = refinement["size"] * 0.5
-                control.boi_max_size = refinement["size"]
+                for key, native in (("size", "boi_size"), ("min_size", "boi_min_size"), ("max_size", "boi_max_size")):
+                    if refinement.get(key) is not None:
+                        setattr(control, native, refinement[key])
                 control.boi_zoneor_label = "label"
                 control.boi_face_label_list = [refinement["zone"]]
                 control.draw_size_control = True
                 requested = next(
-                    (
-                        row["size"]
-                        for row in self.job.raw.get("parameter_sources", {}).get(
-                            "local_refinements", []
-                        )
-                        if row.get("boundary_name")
-                        == refinement.get("source_boundary_name", refinement["zone"])
-                    ),
-                    None,
+                    (row for row in self.job.raw.get("parameter_sources", {}).get("local_refinements", [])
+                     if row.get("boundary_name") == refinement.get("source_boundary_name", refinement["zone"])), {}
                 )
-                self._capture(
-                    f"local_sizing.{refinement['zone']}.size",
-                    control.boi_size,
-                    self._source("local_refinements", requested),
-                    length=True,
-                )
-                self._capture(
-                    f"local_sizing.{refinement['zone']}.min_size",
-                    control.boi_min_size,
-                    "project_derived",
-                    length=True,
-                    basis="half of requested face size",
-                )
+                for key, native in (("size", "boi_size"), ("min_size", "boi_min_size"), ("max_size", "boi_max_size")):
+                    self._capture(
+                        f"local_sizing.{refinement['zone']}.{key}", getattr(control, native),
+                        self._source(f"local_refinements.{refinement['zone']}.{key}", requested.get(key)), length=True,
+                    )
                 self._capture(
                     f"local_sizing.{refinement['zone']}.growth_rate", control.boi_growth_rate
                 )
@@ -417,23 +412,13 @@ class WatertightMeshingRunner:
     def _step_surface_mesh(self) -> dict[str, Any]:
         controls = self.repair_state.snapshot()
         task = self._task_for_step("surface_mesh")
-        if controls["global_size"] is not None:
-            set_task_value(task.cfd_surface_mesh_controls, "max_size", controls["global_size"])
-            set_task_value(
-                task.cfd_surface_mesh_controls, "min_size", controls["global_size"] * 0.5
+        for key, native in (("surface_min_size", "min_size"), ("surface_max_size", "max_size")):
+            if controls[key] is not None:
+                set_task_value(task.cfd_surface_mesh_controls, native, controls[key])
+            self._capture(
+                "surface_mesh." + native, getattr(task.cfd_surface_mesh_controls, native),
+                self._source(key, self.job.raw.get("parameter_sources", {}).get(key)), length=True,
             )
-        requested = self.job.raw.get("parameter_sources", {}).get("global_size")
-        source = self._source("global_size", requested)
-        self._capture(
-            "surface_mesh.max_size", task.cfd_surface_mesh_controls.max_size, source, length=True
-        )
-        self._capture(
-            "surface_mesh.min_size",
-            task.cfd_surface_mesh_controls.min_size,
-            "project_derived" if controls["global_size"] is not None else "native_default",
-            length=True,
-            basis="half of requested global size" if controls["global_size"] is not None else None,
-        )
         self._capture("surface_mesh.growth_rate", task.cfd_surface_mesh_controls.growth_rate)
         if controls["quality_improvement"]:
             set_task_value(task.surface_mesh_preferences, "sm_quality_improve", "yes")
@@ -457,21 +442,20 @@ class WatertightMeshingRunner:
         controls = self.repair_state.snapshot()
         names: list[str] = []
         types: list[str] = []
-        for role, boundary_type in (
-            ("inlet", "velocity-inlet"),
-            ("outlet", "pressure-outlet"),
-            ("wall", "wall"),
-            ("symmetry", "symmetry"),
-        ):
+        for role in BOUNDARY_TYPES_BY_ROLE:
             for name in controls["boundaries"][role]:
                 names.append(name)
-                types.append(boundary_type)
+                types.append(controls["boundary_types"][name])
         if names:
             set_task_value(task, "selection_type", "label")
             # The GUI's current-list may stay empty until this task first executes.
             # Surface meshing's original_zones are observed imported labels, not requested names.
             current = sorted(self.available_names())
             missing = sorted(set(names) - set(current))
+            if missing:
+                self.refresh_labels()
+                current = sorted(self.available_names())
+                missing = sorted(set(names) - set(current))
             if missing:
                 observation = self.observe("update_boundaries", task)
                 observation["missing_boundary_references"] = missing
@@ -650,9 +634,9 @@ class WatertightMeshingRunner:
         settings = self.repair_state.snapshot()
         task = self._task_for_step("volume_mesh")
         set_task_value(task, "volume_fill", self.job.volume_fill)
-        if settings["global_size"] is not None:
+        if settings["volume_max_size"] is not None:
             set_task_value(
-                task.volume_fill_controls, "hex_max_cell_length", settings["global_size"]
+                task.volume_fill_controls, "hex_max_cell_length", settings["volume_max_size"]
             )
         if settings["boundary_layers"]["layers"] == 0:
             set_task_value(task, "prism_layers", False)
@@ -674,36 +658,42 @@ class WatertightMeshingRunner:
             "volume_mesh.max_size",
             task.volume_fill_controls.hex_max_cell_length,
             self._source(
-                "global_size", self.job.raw.get("parameter_sources", {}).get("global_size")
+                "volume_max_size", self.job.raw.get("parameter_sources", {}).get("volume_max_size")
             ),
             length=True,
         )
         return self._run_callable_step("volume_mesh", task, task)
 
-    def _step_final_validation(self) -> dict[str, Any]:
-        self.step_attempts["final_validation"] += 1
-        # Earlier attempts can contain a successful report for a now-invalid mesh.
-        # Validate only this execution, with an explicit metric (never TUI defaults).
+    def _collect_validation_report(self, report_round: int):
         if self.transcript_started:
             stop_transcript(self.session)
-        validation_path = self.transcript_path.with_name(
-            f"validation-{self.step_attempts['final_validation']}.trn"
+        path = self.transcript_path.with_name(
+            f"validation-{self.step_attempts['final_validation']}-{report_round}.trn"
         )
-        self.transcript_started = start_transcript(self.session, validation_path)
-        self.transcript_paths.append(validation_path)
-        errors: list[str] = []
+        self.transcript_started = start_transcript(self.session, path)
+        self.transcript_paths.append(path)
+        errors, warnings = [], []
         if not self.transcript_started:
-            errors.append("Cannot record this quality check; mesh validation is unavailable.")
+            warnings.append("Cannot record the current mesh report.")
         try:
             self.session.tui.mesh.check_mesh()
+        except Exception as error:
+            errors.append(f"Mesh check failed: {type(error).__name__}: {error}")
+        try:
             self.session.tui.mesh.check_quality_level(1)
             self.session.tui.mesh.check_quality()
-            # Fluent's default Tri/Tet skewness convention is "volume"; let
-            # Fluent evaluate its mixed/polyhedral cells, do not derive 1-OQ here.
             self.session.tui.report.quality_method("skewness", "volume")
             self.session.tui.report.cell_quality_limits(["*"])
         except Exception as error:
-            errors.append(f"Quality command failed: {type(error).__name__}: {error}")
+            warnings.append(f"Quality command failed: {type(error).__name__}: {error}")
+        if self.transcript_started:
+            stop_transcript(self.session)
+            self.transcript_started = False
+        return path, errors, warnings
+
+    def _step_final_validation(self) -> dict[str, Any]:
+        self.step_attempts["final_validation"] += 1
+        errors = []
         try:
             self.session.tui.file.cff_files("yes")
             self.session.tui.file.write_mesh(str(self.runtime_output))
@@ -713,6 +703,7 @@ class WatertightMeshingRunner:
         read_back = False
         if output_bytes:
             try:
+                self._boundary_identities = {}
                 self.session.tui.file.read_mesh(str(self.runtime_output))
                 read_back = True
             except Exception as error:
@@ -722,28 +713,44 @@ class WatertightMeshingRunner:
         observation = self.observe("final_validation", None, not errors)
         observation.update({"errors": errors, "output_bytes": output_bytes, "read_back": read_back})
         if errors:
+            observation["failure_kind"] = "mesh_artifact_failed"
             raise StepExecutionError("final_validation", "; ".join(errors), observation)
-        if self.transcript_started:
-            stop_transcript(self.session)
-            self.transcript_started = False
-        quality = parse_quality_report(
-            self.transcript_paths[-1],
-            self.job,
-            self.repair_state.boundaries,
-            read_back=read_back,
-            actual_boundaries=self.actual_boundary_names(),
-            actual_boundary_types=self.actual_boundary_types(),
-        )
-        observation["quality"] = quality
+        self.refresh_labels()
+        actual_types = self.actual_boundary_types()
+        attempts = []
+        for report_round in (1, 2):
+            path, errors, warnings = self._collect_validation_report(report_round)
+            quality = parse_quality_report(
+                path, self.job, self.repair_state.boundaries, read_back=read_back,
+                actual_boundaries=set(actual_types), actual_boundary_types=actual_types,
+                quality_command_failed=bool(warnings),
+                requested_boundary_types=self.repair_state.boundary_types,
+            )
+            attempts.append({"path": str(path), "errors": errors, "warnings": warnings,
+                             "quality_status": quality["quality_status"], "failure_kind": quality["failure_kind"]})
+            observation.update({"quality": quality, "report_attempts": attempts,
+                                "warnings": [*warnings, *quality["warnings"]],
+                                "failure_kind": quality["failure_kind"]})
+            if errors:
+                observation.update({"errors": errors, "failure_kind": "native_mesh_check_failed"})
+                raise StepExecutionError("final_validation", "; ".join(errors), observation)
+            needs_report = quality["failure_kind"] == "report_read_failed" or (
+                not quality["failure_kind"] and quality["quality_status"] != "assessed"
+            )
+            if not needs_report:
+                break
+            if report_round == 1:
+                self.event_callback("final_validation", "Refreshing the mesh report without changing mesh controls.")
         if not quality["passed"]:
             raise StepExecutionError(
                 "final_validation",
-                "Mesh quality, boundary or readback checks did not all pass.",
+                "Mesh validation failed: " + quality["failure_reason"],
                 observation,
             )
         return observation
 
     def revert_from(self, step: str) -> dict[str, Any]:
+        self._boundary_identities = {}
         if not self.transcript_started:
             self._transcript_index += 1
             next_path = self.transcript_path.with_name(
@@ -803,27 +810,96 @@ class WatertightMeshingRunner:
             elif key.casefold() in observed_fields and isinstance(value, str) and value.strip():
                 names.update(_names_from_value(value))
 
-        for observation in self.last_observations.values():
+        for observation in getattr(self, "_live_label_observations", self.last_observations).values():
             visit("arguments", observation.get("arguments", {}))
         return names
+
+    def refresh_labels(self) -> None:
+        """Read live task arguments without executing or reverting a mesh task."""
+        refreshed = {}
+        errors = {}
+        for step in ("surface_mesh", "update_boundaries", "boundary_layers"):
+            try:
+                arguments = self._task_for_step(step).arguments()
+                if not isinstance(arguments, dict):
+                    raise ValueError("Fluent returned non-object task arguments")
+                refreshed[step] = {**self.last_observations.get(step, {}), "arguments": arguments}
+            except Exception as error:
+                errors[step] = f"{type(error).__name__}: {error}"
+        # Discard old name evidence even if a particular refresh failed.
+        self._live_label_observations = refreshed
+        if "update_boundaries" not in refreshed:
+            raise StepExecutionError("update_boundaries", "Fluent boundary labels could not be read.",
+                                     {"failure_kind": "label_read_failed", "read_errors": errors})
+
+    def _surface_identities(self) -> dict[str, tuple]:
+        rows = self.session.fields.field_info.get_surfaces_info()
+        result = {}
+        for name, row in rows.items():
+            zone = row.get("zone_id")
+            surfaces = row.get("surface_id")
+            if isinstance(zone, int) and zone > 0 and surfaces:
+                result[name] = (zone, tuple(sorted(surfaces)), row.get("zone_type"), row.get("type"))
+        return result
+
+    def _remember_boundary_identities(self) -> None:
+        try:
+            self._boundary_identities = self._surface_identities()
+        except Exception:
+            self._boundary_identities = {}
+
+    def verify_reference_identity(self, action: str, parameters: dict) -> dict:
+        """Authorize only a live rename of a previously observed native surface."""
+        previous = getattr(self, "_boundary_identities", {})
+        try:
+            self.refresh_labels()
+            current = self._surface_identities()
+            if action == "replace_zone_reference":
+                pairs = [(parameters["old"], parameters["new"])]
+            elif action == "set_layer_targets":
+                old = self.repair_state.boundary_layers["zones"]
+                new = parameters["zones"]
+                if not old or len(old) != len(new) or len(new) != len(set(new)):
+                    return {"verified": False, "reason": "Scope membership is not preserved"}
+                pairs = []
+                for name in old:
+                    matches = [target for target in new if previous.get(name) is not None and current.get(target) == previous[name]]
+                    if len(matches) != 1:
+                        return {"verified": False, "reason": "No unique native scope match"}
+                    pairs.append((name, matches[0]))
+            else:
+                return {"verified": False, "reason": "Unsupported identity operation"}
+            for old, new in pairs:
+                identity = previous.get(old)
+                if identity is None or current.get(new) != identity or (old != new and old in current):
+                    return {"verified": False, "reason": "Native identity does not prove a rename"}
+                if sum(value == identity for value in previous.values()) != 1 or sum(value == identity for value in current.values()) != 1:
+                    return {"verified": False, "reason": "Native identity is not unique"}
+            return {"verified": True, "pairs": pairs, "native_identities": {new: current[new] for _, new in pairs}}
+        except Exception as error:
+            return {"verified": False, "reason": f"Native identity unavailable: {error}"}
 
     def actual_boundary_names(self) -> set[str]:
         return set(self.actual_boundary_types())
 
     def actual_boundary_types(self) -> dict[str, str]:
-        observation = self.last_observations.get("update_boundaries", {})
+        observation = getattr(self, "_live_label_observations", self.last_observations).get("update_boundaries", {})
         arguments = observation.get("arguments", {})
-        if not isinstance(arguments, dict):
-            return {}
+        if not isinstance(arguments, dict) or not {
+            "boundary_current_list", "boundary_current_type_list"
+        }.issubset(arguments):
+            raise StepExecutionError("final_validation", "Boundary name/type observations are unavailable.",
+                                     {"failure_kind": "label_read_failed"})
         names = _names_from_value(arguments.get("boundary_current_list"))
         types = _names_from_value(arguments.get("boundary_current_type_list"))
         if len(names) != len(types):
-            return {}
+            raise StepExecutionError("final_validation", "Boundary name/type counts do not match.",
+                                     {"failure_kind": "label_read_failed", "names": names, "types": types})
         return dict(zip(names, types, strict=True))
 
     def available_names_by_category(self) -> dict[str, set[str]]:
         """Return only observed names that are compatible with each repair target."""
-        observation = self.last_observations.get("update_boundaries", {})
+        observation = getattr(self, "_live_label_observations", self.last_observations).get("update_boundaries", {})
         arguments = observation.get("arguments", {})
         current_names = _names_from_value(arguments.get("boundary_current_list"))
         current_types = _names_from_value(arguments.get("boundary_current_type_list"))
@@ -833,30 +909,10 @@ class WatertightMeshingRunner:
             "wall": set(),
             "symmetry": set(),
         }
-        inlet_types = {
-            "velocity-inlet",
-            "pressure-inlet",
-            "mass-flow-inlet",
-            "inlet-vent",
-            "intake-fan",
-        }
-        outlet_types = {
-            "pressure-outlet",
-            "mass-flow-outlet",
-            "outflow",
-            "outlet-vent",
-            "exhaust-fan",
-        }
         for name, boundary_type in zip(current_names, current_types):
-            normalized = boundary_type.casefold()
-            if normalized in inlet_types:
-                typed["inlet"].add(name)
-            elif normalized in outlet_types:
-                typed["outlet"].add(name)
-            elif normalized == "wall":
-                typed["wall"].add(name)
-            elif normalized == "symmetry":
-                typed["symmetry"].add(name)
+            for role, supported in BOUNDARY_TYPES_BY_ROLE.items():
+                if boundary_type.casefold() in supported:
+                    typed[role].add(name)
         all_names = self.available_names()
         return {
             "boundaries.inlet": typed["inlet"],
@@ -885,13 +941,15 @@ def boundary_check(
     current_boundaries: dict[str, list[str]],
     actual_boundaries: set[str] | None = None,
     actual_boundary_types: dict[str, str] | None = None,
+    requested_boundary_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    expected_types = {
-        "inlet": "velocity-inlet",
-        "outlet": "pressure-outlet",
-        "wall": "wall",
-        "symmetry": "symmetry",
-    }
+    expected_types = resolve_boundary_types(
+        {name: role for role, names in current_boundaries.items() for name in names},
+        requested_boundary_types if requested_boundary_types is not None else {
+            name: job.boundary_types[name] for names in current_boundaries.values()
+            for name in names if name in job.boundary_types
+        },
+    )
     requested = [
         (role, name)
         for role in ("inlet", "outlet", "wall", "symmetry")
@@ -910,9 +968,9 @@ def boundary_check(
             missing.append(name)
         elif actual_boundary_types is not None:
             actual_type = actual_boundary_types.get(name)
-            if actual_type != expected_types[role]:
+            if actual_type != expected_types[name]:
                 type_mismatches.append(
-                    {"name": name, "expected": expected_types[role], "actual": str(actual_type)}
+                    {"name": name, "expected": expected_types[name], "actual": str(actual_type)}
                 )
     return {
         "ok": not missing and not type_mismatches,
@@ -932,6 +990,8 @@ def parse_quality_report(
     read_back: bool,
     actual_boundaries: set[str] | None = None,
     actual_boundary_types: dict[str, str] | None = None,
+    quality_command_failed: bool = False,
+    requested_boundary_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     paths = [transcript_paths] if isinstance(transcript_paths, Path) else transcript_paths
     text = "\n".join(
@@ -994,6 +1054,7 @@ def parse_quality_report(
         current_boundaries,
         actual_boundaries,
         actual_boundary_types,
+        requested_boundary_types,
     )
     available = (
         cells is not None
@@ -1002,18 +1063,33 @@ def parse_quality_report(
         and negative is not None
     )
     metric_rejected = bool(re.search(r"invalid input|invalid command", text, re.IGNORECASE))
-    passed = bool(
-        available
-        and cells > 0
-        and not metric_rejected
-        and orthogonal is not None
-        and cell_skewness is not None
-        and orthogonal >= job.quality["min_orthogonal_quality"]
-        and cell_skewness <= job.quality["max_skewness"]
-        and negative == 0
-        and boundaries["ok"]
-        and read_back
+    quality_available = orthogonal is not None and cell_skewness is not None and not (metric_rejected or quality_command_failed)
+    measurements = {"min_orthogonal_quality": orthogonal, "max_skewness": cell_skewness}
+    requirements_evaluated = not (job.quality and (metric_rejected or quality_command_failed)) and all(
+        measurements.get(key) is not None for key in job.quality
     )
+    requirements_met = requirements_evaluated and all(
+        measurements[key] >= limit if key == "min_orthogonal_quality" else measurements[key] <= limit
+        for key, limit in job.quality.items()
+    )
+    failure_reason = ""
+    failure_kind = ""
+    if cells is None or negative is None:
+        failure_kind = "report_read_failed"
+        failure_reason = "Mesh validity could not be verified: cell count or volume evidence is unavailable."
+    elif cells <= 0 or negative != 0:
+        failure_kind = "mesh_invalid"
+        failure_reason = "The mesh is empty or has invalid cell volumes."
+    elif not boundaries["ok"] or not read_back:
+        failure_kind = "boundary_or_readback_failed"
+        failure_reason = "Boundary or mesh readback checks failed."
+    elif not requirements_evaluated:
+        failure_kind = "report_read_failed"
+        failure_reason = "The explicitly requested quality requirements could not be evaluated."
+    elif not requirements_met:
+        failure_kind = "quality_requirement_failed"
+        failure_reason = "The mesh does not meet the explicitly requested quality requirements."
+    warnings = [] if quality_available else ["Mesh quality is not fully assessed; quality metrics or commands are unavailable."]
     return {
         "cell_count": cells,
         "minimum_orthogonal_quality": orthogonal,
@@ -1029,5 +1105,9 @@ def parse_quality_report(
         "read_back": read_back,
         "thresholds": dict(job.quality),
         "available": available,
-        "passed": passed,
+        "quality_status": "assessed" if quality_available else "not_assessed",
+        "warnings": warnings,
+        "failure_reason": failure_reason,
+        "failure_kind": failure_kind,
+        "passed": not failure_reason,
     }

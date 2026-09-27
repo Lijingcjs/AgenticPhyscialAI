@@ -26,14 +26,14 @@ def test_unspecified_meshing_values_remain_native_defaults(tmp_path: Path):
         roles={"inlet": "inlet", "outlet": "outlet", "wall": "wall"},
         requirements={
             "length_unit": None,
-            "global_size": None,
+            "surface_max_size": None,
             "local_refinements": [],
             "boundary_layers": None,
         },
     )
     job = MeshJob.from_dict(job_data)
     assert job.length_unit is None
-    assert job.global_size is None
+    assert job.surface_max_size is None
     assert job.boundary_layers["layers"] is None
 
 
@@ -63,18 +63,18 @@ def test_conversion(source, value, expected):
 def test_all_lengths_convert_once_and_preserve_input(tmp_path):
     job = job_at(
         tmp_path,
-        global_size=length(2, "cm"),
+        surface_max_size=length(2, "cm"),
         local_refinements=[{"target": "feed", "boundary_name": "feed", "size": length(5)}],
         boundary_layers={"target": "wall_a", "layers": 3, "first_layer_height": length(0.1)},
     )
     controls = RepairState(job)
-    assert controls.global_size == pytest.approx(0.02)
+    assert controls.surface_max_size == pytest.approx(0.02)
     controls.resolve_units("mm")
     controls.resolve_units("mm")
-    assert controls.global_size == pytest.approx(20)
+    assert controls.surface_max_size == pytest.approx(20)
     assert controls.local_refinements[0]["size"] == pytest.approx(5)
     assert controls.boundary_layers["first_layer_height"] == pytest.approx(0.1)
-    assert job.raw["parameter_sources"]["global_size"]["unit"] == "cm"
+    assert job.raw["parameter_sources"]["surface_max_size"]["unit"] == "cm"
 
 
 def test_layer_scope_does_not_expand_to_all_walls(tmp_path):
@@ -159,6 +159,10 @@ def runner_at(tmp_path, job):
     )
     tasks = {
         "import_geometry": Task(length_unit="mm", file_name=""),
+        "update_boundaries": SimpleNamespace(arguments=lambda: {
+            "boundary_current_list": list(job.boundary_types),
+            "boundary_current_type_list": list(job.boundary_types.values()),
+        }),
         "surface_mesh": surface,
         "boundary_layers": boundary,
         "volume_mesh": volume,
@@ -297,22 +301,25 @@ def test_nested_controls_use_workflow_assignment_not_transient_command():
     assert proxy.written == {"grow_on": "selected-labels"}
 
 
-def test_unresolved_and_empty_layer_scopes_reach_native_interface(tmp_path):
+def test_unresolved_layer_scope_requires_resolution_and_empty_scope_reaches_native(tmp_path):
     catalog = GeometryCatalog(
         catalog_id="new", geometry_id="input", native_catalog={"internal": {"raw_groups": []}}
     )
-    for layers in ({"target": "unresolved", "layers": 3}, {"boundary_names": [], "layers": 3}):
-        requirements = rebind_mesh_targets(
-            requirements={"boundary_layers": layers},
+    with pytest.raises(ValueError, match="Cannot uniquely bind"):
+        rebind_mesh_targets(
+            requirements={"boundary_layers": {"target": "unresolved", "layers": 3}},
             previous_groups=[],
             confirmed_catalog=catalog,
             roles=ROLES,
         )
-        runner, tasks = runner_at(tmp_path, job_at(tmp_path, **requirements))
-        runner.execute_step("boundary_layers")
-        expected = ["unresolved"] if "target" in layers else []
-        assert tasks["boundary_layers"].complete_bl_label_list.get_state() == expected
-        assert tasks["boundary_layers"].face_scope.grow_on.get_state() == "selected-labels"
+    requirements = rebind_mesh_targets(
+        requirements={"boundary_layers": {"boundary_names": [], "layers": 3}},
+        previous_groups=[], confirmed_catalog=catalog, roles=ROLES,
+    )
+    runner, tasks = runner_at(tmp_path, job_at(tmp_path, **requirements))
+    runner.execute_step("boundary_layers")
+    assert tasks["boundary_layers"].complete_bl_label_list.get_state() == []
+    assert tasks["boundary_layers"].face_scope.grow_on.get_state() == "selected-labels"
 
 
 @pytest.mark.parametrize("value", [-2, 0, float("nan"), float("inf")])
@@ -320,7 +327,7 @@ def test_invalid_normalized_lengths_are_rejected(value):
     from src.services.contracts import MeshRequirements
 
     with pytest.raises(ValueError):
-        MeshRequirements(global_size=length(value, "m"))
+        MeshRequirements(surface_max_size=length(value, "m"))
 
 
 def test_normalized_lengths_reach_native_interface_and_repair_controls(tmp_path):
@@ -328,13 +335,13 @@ def test_normalized_lengths_reach_native_interface_and_repair_controls(tmp_path)
 
     requirements = MeshRequirements.model_validate(
         {
-            "global_size": length(0.002, "m"),
+            "surface_max_size": length(0.002, "m"),
             "local_refinements": [{"target": "feed", "boundary_name": "feed", "size": length(0.001, "m")}],
             "boundary_layers": {
                 "layers": 80,
-                "layers_source": "inferred",
+                "layers_source": "user",
                 "growth_rate": 0.2,
-                "growth_rate_source": "inferred",
+                "growth_rate_source": "user",
                 "first_layer_height": length(0.0005, "m"),
             },
         }
@@ -350,7 +357,7 @@ def test_normalized_lengths_reach_native_interface_and_repair_controls(tmp_path)
     assert tasks["boundary_layers"].first_height.get_state() == 0.5
     controls = runner.repair_state
     for action, parameters in (
-        ("set_global_size", {"value": -3}),
+        ("set_surface_max_size", {"value": -3}),
         ("set_local_size", {"zone": "feed", "value": -4}),
         ("set_growth_rate", {"value": 0.3}),
         ("set_layer_count", {"value": -2}),
@@ -509,7 +516,7 @@ def test_native_rejection_requires_approval_for_user_parameters_and_mappings(
 def test_native_setter_failure_retains_attempted_controls(tmp_path):
     from src.workers.fluent.meshing import StepExecutionError
 
-    runner, tasks = runner_at(tmp_path, job_at(tmp_path, global_size=length(-1)))
+    runner, tasks = runner_at(tmp_path, job_at(tmp_path, surface_max_size=length(-1)))
 
     class NativeControls(Task):
         def __setattr__(self, name, value):
@@ -521,7 +528,7 @@ def test_native_setter_failure_retains_attempted_controls(tmp_path):
     runner.execute_step("import_geometry")
     with pytest.raises(StepExecutionError, match="Native max_size rejected") as error:
         runner.execute_step("surface_mesh")
-    assert error.value.observation["controls"]["global_size"] == -1
+    assert error.value.observation["controls"]["surface_max_size"] == -1
 
 
 def test_local_reference_repair_and_each_user_size_change_require_approval(
@@ -668,7 +675,7 @@ def test_final_boundary_check_requires_actual_names_and_types(tmp_path):
 
 def test_model_converted_length_reaches_job_without_changing_import_unit(monkeypatch, tmp_path):
     requests = []
-    requirements = MeshRequirements(global_size=NumericControl(
+    requirements = MeshRequirements(surface_max_size=NumericControl(
         value=0.00002, unit="m", source="user",
         original_expression="20 micrometres", basis="20 micrometres = 0.00002 m",
     ))
@@ -692,8 +699,8 @@ def test_model_converted_length_reaches_job_without_changing_import_unit(monkeyp
         geometry=str(geometry), roles={"feed": "inlet", "exit": "outlet", "wall": "wall"},
         requirements=parsed.model_dump(),
     )
-    assert job["global_size"] == pytest.approx(0.00002)
+    assert job["surface_max_size"] == pytest.approx(0.00002)
     assert job["length_unit"] is None
-    assert parsed.global_size.original_expression == "20 micrometres"
+    assert parsed.surface_max_size.original_expression == "20 micrometres"
     assert "convert" in requests[0]["system_prompt"]
     assert "missing_information" in requests[0]["system_prompt"]

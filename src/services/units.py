@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-METRES_PER_UNIT = {"m": 1.0, "cm": 0.01, "mm": 0.001, "in": 0.0254, "ft": 0.3048}
+from ansys.units import Quantity
 
 
 def convert_length(value: float, source_unit: str, target_unit: str) -> float:
-    return float(value) * METRES_PER_UNIT[source_unit] / METRES_PER_UNIT[target_unit]
+    try:
+        return float(Quantity(float(value), source_unit).to(target_unit).value)
+    except Exception as error:
+        raise ValueError(
+            f"Length conversion failed: {value} {source_unit} -> {target_unit}: {error}"
+        ) from error
 
 
 def control_in_metres(control: dict | None) -> float | None:

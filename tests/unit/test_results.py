@@ -21,7 +21,7 @@ def successful_state(tmp_path: Path) -> dict:
         "keep_open": False,
         "confirmed_geometry": str(tmp_path / "artifacts" / "confirmed.scdoc"),
         "boundary_roles": {"inlet": "inlet", "outlet": "outlet"},
-        "mesh_requirements": {"global_size": {"value": 1}},
+        "mesh_requirements": {"surface_max_size": {"value": 1}},
         "fluent_steps": {
             "final_validation": {"quality": {"minimum": 0.2}},
             "picture": {"path": str(runtime / "final-mesh.png")},

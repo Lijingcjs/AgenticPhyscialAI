@@ -43,6 +43,8 @@ def _repair_resume_step(state: PipelineState, decision: RepairDecision) -> str:
     action, target = decision.action, decision.target_step
     spec = repair_action_spec(action)
     failed = state.get("failed_step")
+    if state.get("error_evidence", {}).get("failure_kind") in {"report_read_failed", "label_read_failed"} and spec.route not in {"retry", "stop"}:
+        raise ValueError("Observation failures require retry or stop; mesh-control changes are not authorized by missing evidence")
     if spec.route == "stop":
         return "failed"
     if state.get("error_evidence", {}).get("session_lost"):
@@ -150,12 +152,14 @@ def _user_parameter_change(state: PipelineState, decision: RepairDecision) -> di
     current = None
     requested_unit = None
     target = "global"
-    if parameter == "global_size":
-        control = requirements.get("global_size") or {}
+    if parameter in {"surface_max_size", "surface_min_size", "volume_max_size"}:
+        control = requirements.get(parameter) or {}
         source, requested = control.get("source"), control.get("value")
         requested_unit = control.get("unit")
-        current = controls.get("global_size")
-    elif parameter == "local_size":
+        current = controls.get(parameter)
+        target = parameter
+    elif parameter in {"local_size", "local_min_size", "local_max_size"}:
+        field = parameter.removeprefix("local_")
         zone = decision.parameters["zone"]
         runtime = next(
             (row for row in controls.get("local_refinements", []) if row.get("zone") == zone),
@@ -167,10 +171,10 @@ def _user_parameter_change(state: PipelineState, decision: RepairDecision) -> di
              if row.get("boundary_name") == original_zone),
             {},
         )
-        control = row.get("size") or {}
+        control = row.get(field) or {}
         source, requested = control.get("source"), control.get("value")
         requested_unit = control.get("unit")
-        current, target = runtime.get("size"), zone
+        current, target = runtime.get(field), zone
     else:
         key = {
             "first_layer_height": "first_layer_height",
@@ -372,8 +376,12 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
             "final_validation",
             "launch_fluent",
         )
+        available_tools = repair_tool_catalog()
+        if state.get("error_evidence", {}).get("failure_kind") in {"report_read_failed", "label_read_failed"}:
+            available_tools = {name: schema for name, schema in available_tools.items()
+                               if repair_action_spec(name).route in {"retry", "stop"}}
         evidence = {
-            "available_tools": repair_tool_catalog(),
+            "available_tools": available_tools,
             "failed_step": state["failed_step"],
             "error": state["error"],
             "error_evidence": state.get("error_evidence", {}),
@@ -473,12 +481,14 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                 "execution label is replaced. A label repair does not grant approval to change the size.\n"
                 "replace_zone_reference uses category, old and new, preserving boundary purpose. A proposed\n"
                 "boundary or scope-label replacement cannot establish physical-surface identity from name\n"
-                "similarity or model inference. The application requests a human mapping before applying\n"
-                "any label replacement or set_layer_targets change, then verifies the supplied label against\n"
+                "similarity or model inference. The application may automatically apply a mapping only when native identities\n"
+                "prove the same surfaces in this session; otherwise it requests human approval. It verifies labels against\n"
                 "Fluent's actual boundary list and, for roles, its reported boundary type. set_layer_targets\n"
                 "takes zones (a list of labels), including when the rejected scope was empty or one description\n"
                 "needs to resolve to multiple native labels.\n"
                 "Never replace an unresolved specific scope with a blanket all-wall scope.\n"
+                "When failure_kind is report_read_failed or label_read_failed, retry the observation step or stop.\n"
+                "Do not change mesh controls merely because measurements or labels could not be read.\n"
                 "For source-code defects that these tools cannot change, stop with the diagnosis.\n"
             ),
             user_prompt=json.dumps(evidence, ensure_ascii=False),
@@ -608,7 +618,15 @@ def execute_repair(state: PipelineState) -> RepairOutcome:
             },
             goto="human_intervention",
         )
+    identity_verified = False
     if spec.approval == "boundary_mapping" and not state.get("repair_approved"):
+        try:
+            client = get_client(state["run_id"], state["runtime_dir"], config_from_state(state))
+            proof = client.call("verify_reference_identity", decision.model_dump(mode="json"))
+            identity_verified = proof.get("verified") is True
+        except Exception:
+            identity_verified = False
+    if spec.approval == "boundary_mapping" and not state.get("repair_approved") and not identity_verified:
         evidence = _copy_runtime_evidence(state, "intervention-boundary-mapping")
         return RepairOutcome(
             update={

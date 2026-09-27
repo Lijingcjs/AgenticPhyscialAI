@@ -161,5 +161,7 @@ def show_outcome(outcome: dict[str, Any]) -> None:
         if result.get(key):
             print(label + ":", result[key])
     print("Diagnosis rounds: " + str(result.get("repair_rounds", outcome.get("repair_rounds", 0))))
+    for warning in result.get("warnings", []):
+        print("Warning: " + str(warning), file=sys.stderr)
     if outcome.get("run_dir"):
         print("Run records: " + str(outcome["run_dir"]), flush=True)

@@ -8,9 +8,12 @@ from typing import Any
 
 from langgraph.types import Command, interrupt
 
+from src.config import config_from_state
+from src.services import selection
 from src.services.boundaries import (
     build_fluent_job,
     confirm_roles,
+    named_groups,
     rebind_mesh_targets,
     validate_confirmed_cad,
 )
@@ -135,6 +138,20 @@ def reload_confirmed_cad(state: PipelineState) -> dict[str, Any]:
             previous_groups=state["labeling"]["groups"],
             confirmed_catalog=catalog,
             roles=roles,
+            resolve_missing=lambda targets: selection.map_mesh_targets(
+                targets=targets,
+                context={
+                    "user_request": state["prompt"],
+                    "requirements": state["mesh_requirements"],
+                    "previous_groups": state["labeling"]["groups"],
+                    "previous_catalog": state.get("target_catalog", {}),
+                    "saved_catalog": catalog.public_dict(),
+                    "saved_groups": named_groups(catalog),
+                    "saved_roles": roles,
+                },
+                audit_dir=_run_dir(state) / "llm",
+                config=config_from_state(state),
+            ),
         )
         job = build_fluent_job(
             geometry=str(runtime_confirmed),

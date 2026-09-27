@@ -31,13 +31,13 @@ def test_repair_registry_covers_contract_and_runtime_handlers():
 
 @pytest.mark.parametrize("source", ["user", "inferred", None])
 @pytest.mark.parametrize("action", [
-    "set_global_size", "set_local_size", "set_first_layer_height",
+    "set_surface_max_size", "set_local_size", "set_first_layer_height",
     "set_layer_count", "set_growth_rate",
 ])
 def test_all_numeric_controls_use_provenance(action, source):
     control = {"source": source, "value": 2, "unit": "mm"}
     requirements = {
-        "global_size": control,
+        "surface_max_size": control,
         "local_refinements": [{"boundary_name": "feed", "size": control}],
         "boundary_layers": {
             "first_layer_height": control,
@@ -180,7 +180,7 @@ def test_optional_visual_failure_preserves_text_diagnosis(tmp_path, monkeypatch,
     class Worker:
         def call(self, operation):
             if operation == "observe":
-                return {"controls": {"global_size": 2}}
+                return {"controls": {"surface_max_size": 2}}
             if failure == "picture":
                 raise RuntimeError("Screenshot unavailable")
             return {"path": str(picture)}
@@ -205,4 +205,4 @@ def test_optional_visual_failure_preserves_text_diagnosis(tmp_path, monkeypatch,
     assert requests[0]["images"] == []
     evidence = json.loads(requests[0]["user_prompt"])
     assert evidence["error"] == "native failure"
-    assert evidence["fluent_observation"]["controls"]["global_size"] == 2
+    assert evidence["fluent_observation"]["controls"]["surface_max_size"] == 2

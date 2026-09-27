@@ -72,7 +72,7 @@ Extract the internal fluid volume.
 Select [opening locations or features] and [the seed face on the inner fluid wall].
 Assign [opening name] as an inlet and [opening name] as an outlet.
 Describe every intended wall or symmetry boundary group.
-Optional: [global size, local refinement, boundary-layer settings, and length units].
+Optional: [surface minimum/maximum size, volume maximum size, local refinement, boundary-layer settings, and length units].
 ```
 
 For example, **only if these features describe your model**:
@@ -81,7 +81,7 @@ For example, **only if these features describe your model**:
 Use Front as the directional reference. Extract the internal fluid volume.
 The left circular opening is inlet_in; the right rectangular opening is outlet_out.
 Use the long inner duct face as the extraction seed. Name the remaining fluid faces as wall boundaries.
-Use a 4 mm global size and three boundary layers on the wall.
+Use a 4 mm surface maximum size, a 4 mm volume maximum size, and three boundary layers on the wall.
 ```
 
 The example names and geometry are not required inputs or special cases in the pipeline. Selection uses the current geometry catalog, images, request, and software feedback.
@@ -151,7 +151,9 @@ Every normal run pauses between SpaceClaim and Fluent:
 3. Enter `yes` to continue, or `no` to cancel.
 4. Before meshing, the agent rereads the saved CAD and checks its groups against the confirmed roles.
 
-The handoff requires exactly one positive-volume solid in the isolated target copy, nonempty nonoverlapping face groups, complete face coverage, and both inlet and outlet roles. A failed check stops before Fluent starts. It does not reject the CAD solely because a catalogued edge has an unexpected adjacent-face count; SpaceClaim and Fluent report any native topology failure at their actual operation stage.
+The handoff requires exactly one positive-volume solid in the isolated target copy, nonempty nonoverlapping face groups, complete face coverage, and a supported role for every group. Inlet and outlet groups are not mandatory. A failed check stops before Fluent starts. It does not reject the CAD solely because a catalogued edge has an unexpected adjacent-face count; SpaceClaim and Fluent report any native topology failure at their actual operation stage.
+
+Local sizing and boundary-layer targets follow unchanged native face membership across group renames. If membership no longer identifies one group, the LLM maps unresolved targets in one request using the original requirements and before/after CAD groups and geometry. Returned groups must exist in the saved CAD. A retained group name alone does not prove unchanged membership. This mapping needs no additional human approval; incomplete or invalid mappings are reported as handoff failures, and no unresolved old target is passed downstream.
 
 In GUI mode, `yes` saves the current working document before rereading it. In hidden mode, the agent uses the file already saved on disk, so save any external edits yourself. Cancelling does not approve or save pending CAD edits.
 
@@ -228,7 +230,13 @@ The mesh archive and `result.json` are required terminal outputs. If either cann
 | `result.json` | Outcome and, when available, `boundary_roles`, `mesh_requirements`, final controls, boundary mapping, boundary-type observations, quality checks, repair history, and English warnings. |
 | `state/` and `latest-state.json` | Per-stage update records and the complete latest workflow state. |
 
-Review the final execution information rather than assuming the original requested values were used unchanged. Validation checks include recorded Fluent boundary information, mesh quality, negative-volume evidence, and mesh write/readback. Keep CAD, credentials, and private run artifacts out of public commits.
+Review the final execution information rather than assuming the original requested values were used unchanged. Validation still requires positive cell count, zero negative-volume evidence, correct boundaries, and successful mesh write/readback. There are no default orthogonal-quality or skewness acceptance thresholds; only explicitly requested thresholds are enforced. Missing quality metrics or failed quality-report commands produce a warning and `quality_status=not_assessed` when no explicit requirement depends on them. Missing mesh-validity evidence still prevents acceptance. Keep CAD, credentials, and private run artifacts out of public commits.
+
+Missing labels trigger a fresh read of Fluent task arguments, and final validation always refreshes boundary observations. Read failures are reported separately from absent or incorrect boundaries. An incomplete mesh report is collected once more without regenerating the mesh; both report attempts are retained. Report or label read failures do not authorize mesh-control changes.
+
+During Fluent repair, a reference change can bypass human approval only when previously recorded and current native surface identities uniquely establish the same object in the same session. Mesh-changing operations invalidate that evidence. Without this evidence, reference and layer-scope changes still require approval. Changes to user-specified numeric controls and disabling boundary layers retain their existing approval rules.
+
+Surface minimum size, surface maximum size, and volume maximum size are independent optional controls (`surface_min_size`, `surface_max_size`, `volume_max_size`). Local `size`, `min_size`, and `max_size` are likewise independent. Explicit user values are preserved. The LLM may propose omitted numeric controls with `source=inferred` and a recorded `basis`; controls left null retain native values. There is no `global_size` alias or automatic copying between controls. Repairs address each size separately. Boundary-layer targets remain native when unspecified; explicit `all walls` still selects the wall groups. Enabling requested controls and choosing the first-height mode remain necessary native operations.
 
 ## Development and packaging
 
@@ -267,7 +275,7 @@ Native SpaceClaim and Fluent integration tests require an available installation
 
 ### Length interpretation and catalog checks
 
-Input remains an existing `.scdoc` file plus a non-empty UTF-8 prompt file. Users may describe lengths in any unambiguous unit. The LLM converts mesh-control lengths to metres, retains `original_expression`, records the conversion in `basis`, and preserves `user`/`inferred` provenance. The program checks positive finite length values but does not independently verify conversion arithmetic. Missing or ambiguous units and unsupported meshing requests pause for clarification. Geometry import units remain separate and retain their existing supported values; mesh-control normalization must not change CAD scale.
+Input remains an existing `.scdoc` file plus a non-empty UTF-8 prompt file. Users may describe lengths in any unambiguous unit. The LLM converts mesh-control lengths to metres, retains `original_expression`, records the conversion in `basis`, and records `user` or `inferred` provenance. Inferred lengths require a nonempty `basis`; inferred layer counts and growth rates require `layers_basis` and `growth_rate_basis`. These proposals remain distinct from explicit user values in the requirements and execution records. The program checks positive finite length values but does not independently verify conversion arithmetic. Missing or ambiguous units and unsupported meshing requests pause for clarification. Geometry import units remain separate: Fluent accepts or rejects explicit import units and supplies its default otherwise. The project no longer applies a five-unit whitelist. Numeric controls are converted to the returned import unit using the Ansys units library included with PyFluent; conversion failures remain errors rather than silently changing CAD scale. Runtime conversion failures enter the existing Reviewer route, and conversion commits all controls together so a failed conversion cannot partially rescale a retry.
 
 Catalogs no longer emit or check a schema version. Geometry signatures compare full serialized numeric values without 12-significant-digit rounding; even small numeric differences can now reject a stale catalog. Topology, native Moniker identity and active-selection checks remain. Numeric sorting uses unrounded values with Moniker tie-breaking; old catalogs/checkpoints are not migrated. Model-visible properties follow declared catalog fields, excluding fields marked internal; undeclared extras are not sent to the model. Edge closure and adjacent-face data remain descriptive catalog evidence; they do not filter the model's explicit extraction choices.
 
@@ -286,3 +294,13 @@ outcome = run_pipeline(
     ),
 )
 ```
+
+### Boundary roles and native types
+
+`boundary_types` maps actual boundary-group names to explicitly requested Fluent types. The shared role/type definition is used by job construction, boundary assignment, repair classification, and final validation:
+
+- Inlet: `velocity-inlet`, `pressure-inlet`, `mass-flow-inlet`, `inlet-vent`, `intake-fan`.
+- Outlet: `pressure-outlet`, `mass-flow-outlet`, `outflow`, `outlet-vent`, `exhaust-fan`.
+- Wall and symmetry: `wall`, `symmetry`.
+
+Unspecified types retain the previous role defaults (`velocity-inlet`, `pressure-outlet`, `wall`, `symmetry`); the resolved types are recorded in the Fluent job and runtime controls. CAD group renames rebind requested types with other meshing targets. An approved Fluent label replacement preserves its requested type, which is reapplied and verified. Native Fluent may reject an unavailable type in its current workflow; that error remains visible. This configures meshing boundary types, not solver pressure/velocity values.

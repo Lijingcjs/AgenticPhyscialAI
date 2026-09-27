@@ -26,6 +26,14 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "The Fluent operation failed.",
         "Inspect the Fluent worker log and detailed record.",
     ),
+    "FLUENT_LABEL_READ_FAILED": (
+        "Current Fluent boundary labels could not be read reliably.",
+        "Retry reading the current labels and inspect the worker record; missing observations do not prove a missing boundary.",
+    ),
+    "FLUENT_REPORT_READ_FAILED": (
+        "The current mesh report does not contain the evidence needed for validation.",
+        "Retry collecting the report without changing mesh controls and inspect the report files.",
+    ),
     "MESH_PREVIEW_FAILED": (
         "The mesh passed validation, but Fluent could not create its preview image.",
         "Inspect the preview-error record; the validated mesh artifact is still available.",
@@ -94,10 +102,6 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Confirmed boundary groups do not cover every fluid face.",
         "Assign every ungrouped fluid face to an inlet, outlet, wall, or symmetry group.",
     ),
-    "CAD_CONFIRMED_TERMINAL_ROLE_MISSING": (
-        "Confirmed boundary groups must include both inlet and outlet roles.",
-        "Set one group to inlet and another group to outlet.",
-    ),
 }
 
 
@@ -154,7 +158,11 @@ def make_error_detail(
 
     supplied = getattr(error, "detail", None)
     detail = dict(supplied) if isinstance(supplied, dict) else {}
-    detail.setdefault("code", _default_code(stage, error))
+    observation_code = {
+        "label_read_failed": "FLUENT_LABEL_READ_FAILED",
+        "report_read_failed": "FLUENT_REPORT_READ_FAILED",
+    }.get((evidence or {}).get("failure_kind"))
+    detail.setdefault("code", observation_code or _default_code(stage, error))
     detail["stage"] = detail.get("stage") or stage
     detail.setdefault("substep", None)
     mapped = _MESSAGES.get(str(detail["code"]))

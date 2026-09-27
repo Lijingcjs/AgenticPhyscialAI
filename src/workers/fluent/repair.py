@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.services.contracts import repair_action_spec
+from src.services.contracts import repair_action_spec, resolve_boundary_types
 from src.services.units import convert_length
 
 from .job import MeshJob
@@ -25,7 +25,12 @@ STEP_ORDER = (
 class RepairState:
     def __init__(self, job: MeshJob):
         self.boundaries = {key: list(value) for key, value in job.boundaries.items()}
-        self.global_size = job.global_size
+        self.boundary_types = resolve_boundary_types(
+            {name: role for role, names in self.boundaries.items() for name in names}, job.boundary_types,
+        )
+        self.surface_max_size = job.surface_max_size
+        self.surface_min_size = job.surface_min_size
+        self.volume_max_size = job.volume_max_size
         self.local_refinements = [
             {**item, "source_boundary_name": item["zone"]} for item in job.local_refinements
         ]
@@ -36,19 +41,32 @@ class RepairState:
     def resolve_units(self, unit: str) -> None:
         """Convert requested dimensions once the Fluent import unit is known."""
         if self.unit is not None and self.unit != unit:
-            if self.global_size is not None:
-                self.global_size = convert_length(self.global_size, self.unit, unit)
-            for item in self.local_refinements:
-                item["size"] = convert_length(item["size"], self.unit, unit)
-            height = self.boundary_layers.get("first_layer_height")
-            if height is not None:
-                self.boundary_layers["first_layer_height"] = convert_length(height, self.unit, unit)
+            sizes = {
+                key: convert_length(value, self.unit, unit) if value is not None else None
+                for key in ("surface_min_size", "surface_max_size", "volume_max_size")
+                for value in (getattr(self, key),)
+            }
+            refinements = [dict(item) for item in self.local_refinements]
+            for item in refinements:
+                for key in ("size", "min_size", "max_size"):
+                    if item.get(key) is not None:
+                        item[key] = convert_length(item[key], self.unit, unit)
+            layers = dict(self.boundary_layers)
+            if layers.get("first_layer_height") is not None:
+                layers["first_layer_height"] = convert_length(layers["first_layer_height"], self.unit, unit)
+            for key, value in sizes.items():
+                setattr(self, key, value)
+            self.local_refinements = refinements
+            self.boundary_layers = layers
         self.unit = unit
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "boundaries": {key: list(value) for key, value in self.boundaries.items()},
-            "global_size": self.global_size,
+            "boundary_types": dict(self.boundary_types),
+            "surface_max_size": self.surface_max_size,
+            "surface_min_size": self.surface_min_size,
+            "volume_max_size": self.volume_max_size,
             "local_refinements": [dict(item) for item in self.local_refinements],
             "boundary_layers": dict(self.boundary_layers),
             "quality_improvement": self.quality_improvement,
@@ -63,11 +81,12 @@ class RepairState:
         *,
         available_names_by_category: dict[str, set[str]] | None = None,
         manual_approved: bool = False,
+        identity_verified: bool = False,
     ) -> tuple[str, str]:
         spec = repair_action_spec(action)
         if spec.worker_handler is None:
             raise ValueError("repair action cannot be applied by the Fluent worker: " + action)
-        if spec.approval == "boundary_mapping" and not manual_approved:
+        if spec.approval == "boundary_mapping" and not (manual_approved or identity_verified):
             raise ValueError("boundary mapping changes require explicit user approval")
         validated = spec.parameters.model_validate(parameters).model_dump(mode="json")
         handler = getattr(self, spec.worker_handler, None)
@@ -84,15 +103,29 @@ class RepairState:
     def _apply_retry(self, parameters: dict[str, Any], **_: Any) -> str:
         return "Retry without changing controls"
 
-    def _apply_global_size(
+    def _apply_surface_max_size(
         self, parameters: dict[str, Any], **_: Any
     ) -> str:
         value = float(parameters["value"])
-        self.global_size = value
-        return f"Set global size to {value}"
+        self.surface_max_size = value
+        return f"Set surface maximum size to {value}"
+
+    def _apply_surface_min_size(self, parameters: dict[str, Any], **_: Any) -> str:
+        self.surface_min_size = float(parameters["value"])
+        return f"Set surface minimum size to {self.surface_min_size}"
+
+    def _apply_volume_max_size(self, parameters: dict[str, Any], **_: Any) -> str:
+        self.volume_max_size = float(parameters["value"])
+        return f"Set volume maximum size to {self.volume_max_size}"
+
+    def _apply_local_min_size(self, parameters: dict[str, Any], **kwargs: Any) -> str:
+        return self._apply_local_size(parameters, field="min_size", **kwargs)
+
+    def _apply_local_max_size(self, parameters: dict[str, Any], **kwargs: Any) -> str:
+        return self._apply_local_size(parameters, field="max_size", **kwargs)
 
     def _apply_local_size(
-        self, parameters: dict[str, Any], *, available_names: set[str], **_: Any
+        self, parameters: dict[str, Any], *, available_names: set[str], field: str = "size", **_: Any
     ) -> str:
         zone = str(parameters["zone"])
         value = float(parameters["value"])
@@ -101,11 +134,11 @@ class RepairState:
         existing = next((item for item in self.local_refinements if item["zone"] == zone), None)
         if existing is None:
             self.local_refinements.append(
-                {"zone": zone, "size": value, "source_boundary_name": None}
+                {"zone": zone, field: value, "source_boundary_name": None}
             )
         else:
-            existing["size"] = value
-        return f"Set local size on {zone} to {value}"
+            existing[field] = value
+        return f"Set local {field} on {zone} to {value}"
 
     def _apply_growth_rate(
         self, parameters: dict[str, Any], **_: Any
@@ -170,7 +203,10 @@ class RepairState:
             }
             if new in other_roles:
                 raise ValueError("replacement label conflicts with another confirmed boundary role")
+            if new != old and new in self.boundary_types and self.boundary_types[new] != self.boundary_types[old]:
+                raise ValueError("replacement label conflicts with another requested boundary type")
             self.boundaries[role] = [new if item == old else item for item in names]
+            self.boundary_types[new] = self.boundary_types.pop(old)
             return f"Replaced {old} with {new} in {category}"
         if category == "boundary_layers":
             names = self.boundary_layers["zones"]

@@ -61,6 +61,7 @@ def validate_mesh(state: PipelineState) -> dict[str, Any]:
     steps = dict(state.get("fluent_steps", {}))
     steps[step] = result
     warnings = list(state.get("warnings", []))
+    warnings.extend(result.get("warnings", []))
     try:
         steps["picture"] = client.call("picture")
     except Exception as error:
