@@ -1,0 +1,5 @@
+Use top view as the directional reference.
+This is already a single closed fluid volume; select the left square opening, the upper square branch opening, and the right square opening.
+Assign the left opening as inlet_a, the upper branch opening as inlet_b, and the right opening as outlet.
+Treat the remaining fluid boundary as a wall.
+Global mesh size: 5 mm. Length unit: mm.

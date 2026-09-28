@@ -1,0 +1,5 @@
+Use top view as the directional reference.
+This is already a single closed fluid volume; select the square opening at the upper left end of the U-channel and the square opening at the upper right end.
+Assign the upper left opening as inlet and the upper right opening as outlet.
+Treat the remaining fluid boundary as a wall.
+Global mesh size: 4 mm. Length unit: mm.
