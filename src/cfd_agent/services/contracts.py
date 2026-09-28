@@ -184,6 +184,7 @@ class RepairDecision(BaseModel):
         "query_geometry",
         "understand_prompt",
         "verify_selection",
+        "use_existing_fluid_body",
         "extract_volume",
         "label_faces",
         "validate_cad",

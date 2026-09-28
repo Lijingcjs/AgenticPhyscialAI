@@ -7,6 +7,7 @@ LABELS = {
     "query_geometry": "Query SpaceClaim geometry and reference views",
     "understand_prompt": "LLM object selection and mesh requirements",
     "verify_selection": "Verify native SpaceClaim selection",
+    "use_existing_fluid_body": "Use existing closed fluid volume",
     "extract_volume": "SpaceClaim: extract fluid volume",
     "label_faces": "SpaceClaim: group and label boundaries",
     "validate_cad": "Check CAD and boundary coverage",

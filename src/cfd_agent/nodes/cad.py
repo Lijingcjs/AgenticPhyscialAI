@@ -34,6 +34,14 @@ def _is_existing_fluid_body(catalog: GeometryCatalog) -> bool:
     )
 
 
+def fluid_volume_route(state: PipelineState) -> str:
+    """Choose the topology-driven fluid-volume path after selection validation."""
+    if state.get("error"):
+        return "review_failure"
+    catalog = GeometryCatalog.model_validate(state["catalog"])
+    return "use_existing_fluid_body" if _is_existing_fluid_body(catalog) else "extract_volume"
+
+
 def prepare(state: PipelineState) -> dict[str, Any]:
     try:
         source = Path(state["source_geometry"]).resolve()
@@ -151,14 +159,12 @@ def verify_selection(state: PipelineState) -> dict[str, Any]:
         return _failed(state, "verify_selection", error)
 
 
-def extract_volume(state: PipelineState) -> dict[str, Any]:
+def _process_fluid_volume(
+    state: PipelineState, *, existing_fluid_body: bool, stage: str
+) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
         catalog = GeometryCatalog.model_validate(state["catalog"])
-        # The model selects boundary candidates, but it cannot decide whether
-        # the input is a reusable fluid body.  That decision is based on the
-        # SpaceClaim topology catalog: one solid, positive volume, no free edge.
-        existing_fluid_body = _is_existing_fluid_body(catalog)
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],
@@ -173,7 +179,7 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
         )
         return _persist(
             state,
-            "extract_volume",
+            stage,
             {
                 "extraction": result,
                 "working_geometry": str(output),
@@ -184,7 +190,33 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
             },
         )
     except Exception as error:
+        return _failed(state, stage, error)
+
+
+def use_existing_fluid_body(state: PipelineState) -> dict[str, Any]:
+    """Pass a verified closed fluid solid directly to boundary grouping."""
+    return _process_fluid_volume(
+        state,
+        existing_fluid_body=True,
+        stage="use_existing_fluid_body",
+    )
+
+
+def extract_volume(state: PipelineState) -> dict[str, Any]:
+    """Extract a fluid volume when the input is not an existing fluid solid.
+
+    The topology check remains here as a compatibility guard for direct callers;
+    the graph normally routes to this node only for extraction-required inputs.
+    """
+    try:
+        catalog = GeometryCatalog.model_validate(state["catalog"])
+    except Exception as error:
         return _failed(state, "extract_volume", error)
+    return _process_fluid_volume(
+        state,
+        existing_fluid_body=_is_existing_fluid_body(catalog),
+        stage="extract_volume",
+    )
 
 
 def label_faces(state: PipelineState) -> dict[str, Any]:

@@ -298,7 +298,13 @@ def execute_repair(state: PipelineState, *, user_approved: bool = False) -> Repa
     if decision.action == "retry_step" and target not in fluent_targets:
         return RepairOutcome(update={"error": "", "status": "running"}, goto=target)
     if decision.action == "replace_object_reference":
-        if target not in {"verify_selection", "extract_volume", "label_faces", "validate_cad"}:
+        if target not in {
+            "verify_selection",
+            "use_existing_fluid_body",
+            "extract_volume",
+            "label_faces",
+            "validate_cad",
+        }:
             return RepairOutcome(
                 update={"error": "replace_object_reference is not valid for this step"},
                 goto="failed",

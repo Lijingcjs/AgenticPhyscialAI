@@ -24,6 +24,7 @@ def build_graph(checkpoint_path: str | Path):
     add_node("query_geometry", cad.query_geometry)
     add_node("understand_prompt", cad.understand_prompt)
     add_node("verify_selection", cad.verify_selection)
+    add_node("use_existing_fluid_body", cad.use_existing_fluid_body)
     add_node("extract_volume", cad.extract_volume)
     add_node("label_faces", cad.label_faces)
     add_node("validate_cad", cad.validate_cad)
@@ -40,17 +41,41 @@ def build_graph(checkpoint_path: str | Path):
     add_node("failed", results.failed)
     add_node("cancelled", confirmation.cancelled)
 
-    normal = [
+    preflight = [
         "prepare",
         "query_geometry",
         "understand_prompt",
         "verify_selection",
-        "extract_volume",
-        "label_faces",
-        "validate_cad",
     ]
-    builder.add_edge(START, normal[0])
-    for current, following in zip(normal, normal[1:]):
+    builder.add_edge(START, preflight[0])
+    for current, following in zip(preflight, preflight[1:]):
+        builder.add_conditional_edges(
+            current,
+            results.has_error,
+            {
+                "review_failure": "review_failure",
+                "continue": following,
+            },
+        )
+    builder.add_conditional_edges(
+        "verify_selection",
+        cad.fluid_volume_route,
+        {
+            "review_failure": "review_failure",
+            "use_existing_fluid_body": "use_existing_fluid_body",
+            "extract_volume": "extract_volume",
+        },
+    )
+    for current in ("use_existing_fluid_body", "extract_volume"):
+        builder.add_conditional_edges(
+            current,
+            results.has_error,
+            {
+                "review_failure": "review_failure",
+                "continue": "label_faces",
+            },
+        )
+    for current, following in (("label_faces", "validate_cad"),):
         builder.add_conditional_edges(
             current,
             results.has_error,

@@ -23,7 +23,12 @@ from cfd_agent.workers.repair_protocol import RepairState
 def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):
     graph = build_graph(tmp_path / "checkpoints.sqlite")
     names = set(graph.get_graph().nodes)
-    assert {"extract_volume", "label_faces", "human_confirmation"} <= names
+    assert {
+        "use_existing_fluid_body",
+        "extract_volume",
+        "label_faces",
+        "human_confirmation",
+    } <= names
     assert {
         "import_geometry",
         "local_sizing",
